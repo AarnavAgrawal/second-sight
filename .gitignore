@@ -15,3 +15,7 @@ dist/
 !data/recordings/KSFO/20261031-123209.jsonl
 # Generated copy of shared/ for terse deploy (scripts/sync-actor-shared.ts)
 actor/src/shared/
+data/recordings/**/*.mp3
+.DS_Store
+.superserve-sandbox
+data/atc/

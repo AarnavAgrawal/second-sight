@@ -212,6 +212,23 @@ export interface ConflictAlert {
   dueAt: number;
 }
 
+/** One transmission heard on a real ATC frequency (LiveATC archive), transcribed and parsed. Evaluation data only. */
+export interface HeardTransmission {
+  id: string;
+  feed: string;
+  ts: number;
+  durSec: number;
+  text: string;
+  speaker: "controller" | "pilot" | "unknown";
+  /** ICAO callsign matched against ADS-B traffic at that moment, or null. */
+  callsign: string | null;
+  hex: string | null;
+  /** Altitude/heading clearances in the transmission (controller) or read back (pilot). */
+  clearances: ClearanceRequest[];
+  /** Anything else worth keeping: frequency change, approach clearance, traffic call. */
+  note: string | null;
+}
+
 export interface FeedItem {
   ts: number;
   from: string;
@@ -247,4 +264,89 @@ export interface TrafficEntry {
 export interface ConformanceResult {
   status: Status;
   reason: string;
+}
+
+// ---------- Evaluation (shadow comparison against the real controller) ----------
+
+/** What the aircraft did after a heard clearance, from recorded ADS-B. */
+export type OutcomeResult = "complied" | "in_progress" | "no_change" | "contrary" | "no_data";
+
+/** Second Sight's ruling on a heard clearance, from the same facts the sector agents use. */
+export interface ShadowRuling {
+  decision: "issue" | "coordinate" | "unable";
+  reason: string;
+  /** Phraseology of the alternative Second Sight would offer (unable only). */
+  alternative: string | null;
+  phase: FlightPhase;
+  conflicts: ProbeConflict[];
+}
+
+export interface ClearanceEval {
+  id: string;
+  ts: number;
+  callsign: string;
+  hex: string;
+  /** Transcript of the controller transmission. */
+  text: string;
+  req: ClearanceRequest;
+  /** Aircraft state when the clearance was heard. */
+  before: { altFt: number | null; magTrackDeg: number; vertRateFpm: number } | null;
+  outcome: { result: OutcomeResult; detail: string; reachedInSec: number | null };
+  ruling: ShadowRuling | null;
+  /** Track around the clearance for a sparkline: seconds relative to ts. */
+  track: { t: number; altFt: number | null; magTrackDeg: number }[];
+}
+
+export interface ConflictEval {
+  id: string;
+  ts: number;
+  a: string;
+  b: string;
+  predictedInSec: number;
+  predictedLatNm: number;
+  predictedVertFt: number;
+  /** Closest actual approach over the next 150 s of recorded traffic (null when one aircraft dropped out). */
+  actualMinLatNm: number | null;
+  actualVertAtMinFt: number | null;
+  actualLoS: boolean;
+  /** A heard controller clearance to either aircraft from 30 s before to 150 s after the alert. */
+  controllerActed: boolean;
+  actedText: string | null;
+  actedAfterSec: number | null;
+}
+
+export interface EvalReport {
+  icao: string;
+  fromTs: number;
+  toTs: number;
+  /** Data available for range picking. */
+  span: { heardFrom: number | null; heardTo: number | null; adsbFrom: number | null; adsbTo: number | null };
+  coverage: {
+    heard: number;
+    controller: number;
+    pilot: number;
+    unknown: number;
+    controllerClearances: number;
+    matched: number;
+    /** Controller clearances heard while ADS-B was recording (callsigns can only be matched then). */
+    duringAdsb: number;
+    /** Parsed values that cannot be clearances (speeds read as altitudes, etc.), left out of scoring. */
+    implausible: number;
+    withAdsb: number;
+  };
+  kpis: {
+    complied: number;
+    outcomeKnown: number;
+    issue: number;
+    coordinate: number;
+    unable: number;
+    /** Ruled issue/coordinate and the aircraft complied: Second Sight and the controller agreed. */
+    agreed: number;
+    conflicts: number;
+    conflictsWithLoS: number;
+    conflictsControllerActed: number;
+  };
+  bins: { ts: number; heard: number; clearances: number; unable: number; conflicts: number }[];
+  clearances: ClearanceEval[];
+  conflicts: ConflictEval[];
 }

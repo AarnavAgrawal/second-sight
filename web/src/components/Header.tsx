@@ -52,6 +52,9 @@ export function Header({ airport, count, dataSource, connected, muted, setMuted,
         <button className={`btn ${muted ? "" : "on"}`} onClick={() => setMuted(!muted)} aria-pressed={!muted} title="Spoken controller replies">
           {muted ? "VOICE OFF" : "VOICE ON"}
         </button>
+        <a className="btn" href={`#/eval/${airport?.icao ?? "KSFO"}`} title="Compare with the real controller">
+          Evaluation
+        </a>
         <button className="btn" onClick={onChangeAirport}>
           Change airport
         </button>

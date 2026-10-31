@@ -8,6 +8,7 @@ export const AIRSPACE_ID = "main";
 
 export const airspace = () => actors.Airspace.get(AIRSPACE_ID);
 export const aircraft = (hex: string) => actors.Aircraft.get(hex.toLowerCase());
+export const evalLog = (icao: string) => actors.EvalLog.get(icao.toUpperCase());
 
 export type ActorName = "Airspace" | "Aircraft";
 

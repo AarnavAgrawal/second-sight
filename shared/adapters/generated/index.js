@@ -77,6 +77,29 @@ export const actors = {
         prepareWebsocket(authorization, options = {}, dependencies = {}) {
             return new ActorProxy(options, dependencies).handle({ ...authorization, actorName: "Airspace" })
         }
+    },
+    ["EvalLog"]: {
+        get(actorId, transport) {
+            return $createActorStub(
+                "EvalLog",
+                actorId,
+                [
+                    { name: "addHeard", result: "value" },
+                    { name: "heard", result: "value" },
+                    { name: "removeHeard", result: "value" },
+                    { name: "summary", result: "value" }
+                ],
+                transport
+            )
+        },
+        /**
+         * Allow a frontend connection after your backend checks the user's access.
+         * @example
+         * const grant = await actors.EvalLog.prepareWebsocket({ actorId: "actor-id", metadata })
+         */
+        prepareWebsocket(authorization, options = {}, dependencies = {}) {
+            return new ActorProxy(options, dependencies).handle({ ...authorization, actorName: "EvalLog" })
+        }
     }
 }
 /**
@@ -86,7 +109,7 @@ export const actors = {
  */
 export class ActorProxy extends $SocketProxy {
     constructor(options = {}, dependencies = {}) {
-        super({ ["Aircraft"]: {}, ["Airspace"]: {} }, options, dependencies)
+        super({ ["Aircraft"]: {}, ["Airspace"]: {}, ["EvalLog"]: {} }, options, dependencies)
     }
     handle(authorization) {
         return super.handle(authorization)

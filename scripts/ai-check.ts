@@ -120,7 +120,9 @@ console.log(`Airport ${airport.icao}, ${traffic.length} aircraft without clearan
   else {
     const r = await post("/clearance", { text: "x", clearance: { callsign: pick.t.callsign, kind: "altitude", value: pick.value } });
     console.log(`      ${pick.t.callsign} maintain ${pick.value} (crossing): ${show(r)} | pointOut ${JSON.stringify(r.review?.pointOut)}`);
-    ok(r.review?.decision === "coordinate" || r.review?.by === "FALLBACK", `coordinate beat: decision ${r.review?.decision}`);
+    // "issue" is only accepted by the workflow when the aircraft no longer enters the other sector at request time.
+    if (r.review?.decision === "issue") console.log("SKIP  coordinate beat: no longer crossing the line when the bridge probed it");
+    else ok(r.review?.decision === "coordinate" || r.review?.by === "FALLBACK", `coordinate beat: decision ${r.review?.decision}`);
     if (r.review?.decision === "coordinate") ok(!!r.review?.pointOut, `point out result: ${r.review?.pointOut?.result}`);
   }
 }

@@ -6,6 +6,7 @@ export * from "./separation.ts";
 export * from "./probe.ts";
 export * from "./conformance.ts";
 export * from "./boundary.ts";
+export * from "./traffic.ts";
 export * from "./telephony.ts";
 export * from "./phraseology.ts";
 export * from "./adsb.ts";

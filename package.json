@@ -8,7 +8,7 @@
     "bridge": "bun bridge/src/index.ts",
     "agent": "bun agents/src/index.ts",
     "web": "bun run --cwd web dev",
-    "test": "bun test shared"
+    "test": "bun test shared bridge mastra"
   },
   "devDependencies": {
     "bun-types": "^1.4.4",

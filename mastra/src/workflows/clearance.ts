@@ -72,7 +72,7 @@ const Flow = z.object({
   final: ClearanceResultSchema.nullable(),
   progressToken: z.string().nullable(),
 });
-type Flow = z.infer<typeof Flow>;
+export type Flow = z.infer<typeof Flow>;
 
 export const ClearanceInputSchema = z.object({
   text: z.string(),
@@ -83,12 +83,12 @@ export const ClearanceInputSchema = z.object({
   progressToken: z.string().optional(),
 });
 
-const log = (f: Flow, id: z.infer<typeof StepId>, status: "ok" | "fail" | "skipped", detail: string, t0: number): Flow => {
+export const log = (f: Flow, id: z.infer<typeof StepId>, status: "ok" | "fail" | "skipped", detail: string, t0: number): Flow => {
   const entry = { id, status, detail, ms: Date.now() - t0 };
   if (f.progressToken) progress.get(f.progressToken)?.(entry);
   return { ...f, steps: [...f.steps, entry] };
 };
-const finish = (f: Flow, extra: Partial<ClearanceResult> & { issued: boolean }): Flow => ({
+export const finish = (f: Flow, extra: Partial<ClearanceResult> & { issued: boolean }): Flow => ({
   ...f,
   final: {
     transcript: f.text,
@@ -190,7 +190,7 @@ const probeStep = createStep({
   },
 });
 
-function alternativeOf(f: Flow): z.infer<typeof Alternative> | undefined {
+export function alternativeOf(f: Flow): z.infer<typeof Alternative> | undefined {
   const alt = (f.probe as ProbeResult | null)?.alternative;
   if (!alt || !f.callsign) return undefined;
   return { callsign: f.callsign, kind: alt.kind, value: alt.value, ...(alt.turn ? { turn: alt.turn } : {}), text: clearancePhrase(f.callsign, alt, f.currentAltFt) };

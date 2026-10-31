@@ -4,10 +4,11 @@ import { aircraft, airspace } from "../../shared/adapters/actors.ts";
 import { normalizeAdsb } from "../../shared/adsb.ts";
 import { boundaryApproach } from "../../shared/boundary.ts";
 import { formatAltitude } from "../../shared/conformance.ts";
-import { haversineNm, trueToMag } from "../../shared/geo.ts";
+import { trueToMag } from "../../shared/geo.ts";
 import { conflictAlert } from "../../shared/separation.ts";
 import type { Airport, Position, Sector } from "../../shared/types.ts";
 import { config } from "./config.ts";
+import { boundaryGate, caPairAllowed, discreteSquawkSet, dropShadows, latestHandoffByHex, type HandoffLike } from "./filters.ts";
 import { postRadar } from "./radar.ts";
 import { LiveSource, ReplaySource, type Source } from "./source.ts";
 
@@ -19,16 +20,6 @@ const hundreds = (ft: number | null) => (ft == null ? "---" : String(Math.max(0,
 const trend = (vr: number) => (vr > 500 ? "climbing" : vr < -500 ? "descending" : "level");
 const fpm = (vr: number) => `${Math.abs(Math.round(vr / 100) * 100).toLocaleString("en-US")} fpm`;
 const pairKey = (x: string, y: string) => [x, y].sort().join("|");
-
-/** Drop TIS-B/ADS-R shadow targets (non-ICAO "~" hex) that duplicate a real ICAO target. */
-function dropShadows(positions: Position[]): Position[] {
-  const real = positions.filter((p) => !p.hex.startsWith("~"));
-  return positions.filter(
-    (p) =>
-      !p.hex.startsWith("~") ||
-      !real.some((r) => haversineNm(p.lat, p.lon, r.lat, r.lon) < 0.5 && Math.abs((p.altFt ?? 0) - (r.altFt ?? 0)) < 300),
-  );
-}
 
 export interface PollerStatus {
   airport: Airport | null;
@@ -52,6 +43,8 @@ class Poller {
   private timer: ReturnType<typeof setTimeout> | null = null;
   // Derived caches (reset per session).
   private boundaryEmitted = new Set<string>();
+  /** hex -> owner for which the one allowed BOUNDARY retry was already sent. */
+  private boundaryRetried = new Map<string, Sector>();
   private caLastRaised = new Map<string, number>();
   private caMisses = new Map<string, number>();
   private caSuppressUntil = new Map<string, number>();
@@ -77,6 +70,7 @@ class Poller {
     this.latest.clear();
     this.positions = [];
     this.boundaryEmitted.clear();
+    this.boundaryRetried.clear();
     this.caLastRaised.clear();
     this.caMisses.clear();
     this.caSuppressUntil.clear();
@@ -127,7 +121,7 @@ class Poller {
     const positions = dropShadows(normalizeAdsb(snap, airport, now));
     // Terminal conflict alert and handoffs are for tracked IFR traffic (discrete squawk, not VFR 1200).
     // CA eligibility: a known, non-VFR squawk (drops TIS-B/unknown targets that carry no squawk).
-    const discrete = new Set(snap.ac.filter((a) => a.squawk != null && String(a.squawk) !== "1200").map((a) => String(a.hex).toLowerCase()));
+    const discrete = discreteSquawkSet(snap.ac);
     this.positions = positions;
     this.latest = new Map(positions.map((p) => [p.hex, p]));
     this.lastPollAt = now;
@@ -146,7 +140,7 @@ class Poller {
     if (gen !== this.gen) return;
     await this.conflicts(eligible, tc, snapState.conflicts, airport, now, focus);
     if (gen !== this.gen) return;
-    await this.boundaries(focus ? eligible.filter((p) => focus.has(p.callsign)) : eligible, tc, snapState.handoffs, airport);
+    await this.boundaries(focus ? eligible.filter((p) => focus.has(p.callsign)) : eligible, tc, snapState.handoffs, airport, now);
   }
 
   /** Feed positions to Aircraft actors that have an active clearance. */
@@ -158,9 +152,11 @@ class Poller {
         if (!pos) return;
         try {
           const r = await aircraft(hex).ingestPosition(pos);
-          if (!r.changed) return;
+          // Also resync when the Airspace shows another status, e.g. `coasting` set by updateTraffic
+          // while the track was missing: the Aircraft actor's own status did not change, but the scope must.
+          if (!r.changed && statuses[hex]?.status === r.status) return;
           await airspace().setStatus(hex, r.status, r.reason);
-          if (r.status === "non_conforming") await this.postNonconf(pos, tc[hex] ?? null, r.reason);
+          if (r.changed && r.status === "non_conforming") await this.postNonconf(pos, tc[hex] ?? null, r.reason);
         } catch (e) {
           console.error(`[conformance] ${hex}`, (e as Error).message);
         }
@@ -202,19 +198,11 @@ class Poller {
     now: number,
     focus: Set<string> | null = null,
   ) {
-    // Terminal-area rule: pairs where both aircraft are in the approach/departure corridor
-    // (within 6 NM of the field and below 3,000 ft AGL) are parallel-runway traffic, not conflicts.
-    const inCorridor = (p: Position) =>
-      haversineNm(p.lat, p.lon, airport.lat, airport.lon) < 6 && (p.altFt ?? 0) < airport.elevationFt + 3000;
+    // Terminal-area rules (filters.ts): replay focus, approach corridor, low-level GA floor.
     const preds = conflictAlert(positions, airport).filter((c) => {
       const a = this.latest.get(c.hexA);
       const b = this.latest.get(c.hexB);
-      if (!a || !b) return false;
-      if (focus && !focus.has(a.callsign) && !focus.has(b.callsign)) return false;
-      if (inCorridor(a) && inCorridor(b)) return false;
-      // Low-level GA: both aircraft below the CA floor (default 2,500 ft AGL) are not alerted.
-      const floor = airport.elevationFt + config.caFloorAglFt;
-      return !((a.altFt ?? 0) < floor && (b.altFt ?? 0) < floor);
+      return !!a && !!b && caPairAllowed(a, b, airport, config.caFloorAglFt, focus);
     });
     const predicted = new Set(preds.map((p) => pairKey(p.hexA, p.hexB)));
     const open = existing.filter((c) => c.state !== "resolved");
@@ -294,25 +282,38 @@ class Poller {
     }
   }
 
-  private async boundaries(positions: Position[], tc: Record<string, Sector>, handoffs: { hex: string; state: string }[], airport: Airport) {
-    const pending = new Set(handoffs.filter((h) => h.state === "pending" || h.state === "overdue").map((h) => h.hex));
-    // Forget emissions once ownership changed (new crossing possible).
+  private async boundaries(positions: Position[], tc: Record<string, Sector>, handoffs: HandoffLike[], airport: Airport, now: number) {
+    const lastHandoff = latestHandoffByHex(handoffs);
+    // Forget emissions and retries once ownership changed or the aircraft left (new crossing possible).
     for (const k of [...this.boundaryEmitted]) {
       const [hex, owner] = k.split(":");
       if (!this.latest.has(hex!) || tc[hex!] !== owner) this.boundaryEmitted.delete(k);
     }
+    for (const [hex, owner] of [...this.boundaryRetried]) {
+      if (!this.latest.has(hex) || tc[hex] !== owner) this.boundaryRetried.delete(hex);
+    }
     for (const p of positions) {
       const owner = tc[p.hex];
-      if (!owner || pending.has(p.hex)) continue;
+      if (!owner) continue;
       if (p.altFt == null || p.altFt >= config.handoffCeilingFt) continue;
       const key = `${p.hex}:${owner}`;
-      if (this.boundaryEmitted.has(key)) continue;
+      // One BOUNDARY per owner, plus one retry 30 s after a handoff ended overdue or unable (filters.ts).
+      const gate = boundaryGate({
+        owner,
+        emitted: this.boundaryEmitted.has(key),
+        retried: this.boundaryRetried.get(p.hex) === owner,
+        handoff: lastHandoff.get(p.hex),
+        now,
+      });
+      if (gate === "skip") continue;
       const b = boundaryApproach(p, airport, owner);
       if (!b) continue;
       this.boundaryEmitted.add(key);
+      const retry = gate === "retry";
+      if (retry) this.boundaryRetried.set(p.hex, owner);
       const side = p.lat >= airport.lat ? "north" : "south";
       await postRadar(
-        `BOUNDARY ${p.callsign} ${b.from}->${b.to} in ${b.distNm.toFixed(1)} NM, ${hundreds(p.altFt)} ${trend(p.vertRateFpm)}`,
+        `BOUNDARY ${p.callsign} ${b.from}->${b.to} in ${b.distNm.toFixed(1)} NM, ${hundreds(p.altFt)} ${trend(p.vertRateFpm)}${retry ? " (retry)" : ""}`,
         {
           type: "BOUNDARY",
           session: this.session,
@@ -328,6 +329,8 @@ class Poller {
           trackTrueDeg: Math.round(p.trackTrueDeg),
           lat: p.lat,
           lon: p.lon,
+          // 1 = first BOUNDARY for this owner, 2 = the one retry after a handoff ended overdue or unable.
+          attempt: retry ? 2 : 1,
         },
       );
     }

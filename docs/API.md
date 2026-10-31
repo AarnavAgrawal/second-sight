@@ -159,6 +159,7 @@ Apply `state`, then shallow-merge each `state_update.changes` (each changed top-
 
 - **Data block:** line 1 `callsign`; line 2 = altitude in hundreds (3 digits) + `↑` if `vertRateFpm > 500` / `↓` if `< -500` + ground speed in tens: `078↑ 28`. Helper: `dataBlock(altFt, vertRateFpm, gsKt)` in `shared/format.ts`.
 - **Status colors:** `none` white, `pending` amber, `conforming` green, `non_conforming` red, `coasting` gray + `CST`.
+- **Coasting tracks:** an aircraft with an active clearance (status not `none`) that drops out of the ADS-B feed stays in `traffic` with its **last known** position/altitude/`ts`/`seenSec` and `status: "coasting"`, keeping its `sector`/`trackControl`, until 60 s after its last `ts`; then it is removed. Its age is `Date.now() - ts` (the entry is not dead-reckoned). If it reappears, the fresh entry replaces it and its status returns to the conformance result on the next poll. Aircraft without a clearance still disappear as soon as they leave the feed.
 - **Sector tint:** `sector` (= `trackControl[hex]`).
 - **CA:** `ca: true` → red `CA` on the data block; draw a line between `hexA`/`hexB` of each open conflict.
 - **Sector boundary:** the east-west line (latitude `airport.lat`); NORTH above, SOUTH below. Range rings every 10 NM to `airport.radiusNm`.
@@ -179,5 +180,5 @@ Apply `state`, then shallow-merge each `state_update.changes` (each changed top-
 `FeedItem` = `{ ts, from, to, text }`.
 - `from`: `RADAR` (machine events), `NORTH`, `SOUTH`, `MONITOR` (agents), `CIC` (human / bridge on behalf of the CIC), `SYSTEM`.
 - `to`: a channel (`#radar`, `#coord`, `#alerts`, `#cic`) or, for DMs, the recipient name (`NORTH`, `SOUTH`, `MONITOR`, `CIC`). "DM" filter = `!to.startsWith("#")`.
-- RADAR event formats: `BOUNDARY UAL123 NORTH->SOUTH in 2.5 NM, 078 climbing`, `CA UAL123/DAL456 predicted 1.8 NM / 400 FT in 70 s (NORTH/SOUTH)`, `NONCONF SWA2140 cleared 040, now 078 climbing 1,800 fpm (owner SOUTH)`, `SESSION KSFO (San Francisco International Airport) started, radius 35 NM`.
+- RADAR event formats: `BOUNDARY UAL123 NORTH->SOUTH in 2.5 NM, 078 climbing` (one retry, suffixed ` (retry)` with `data.attempt: 2`, 30 s after a handoff ends `overdue` or `unable`), `CA UAL123/DAL456 predicted 1.8 NM / 400 FT in 70 s (NORTH/SOUTH)`, `NONCONF SWA2140 cleared 040, now 078 climbing 1,800 fpm (owner SOUTH)`, `SESSION KSFO (San Francisco International Airport) started, radius 35 NM`.
 - **Speak (TTS)** new items where `to === "#cic" || to === "CIC"` and `from` is `NORTH`, `SOUTH` or `MONITOR` (Unable replies, APREQ outcomes, escalations, acknowledgements), with `voice = from`. Don't speak the backlog from the initial `state` message.

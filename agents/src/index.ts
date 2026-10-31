@@ -128,7 +128,7 @@ async function route(m: RelayMessage): Promise<void> {
   if (m.kind === "dm" && m.from === "CIC" && d.type === "CLEARANCE_REQUEST" && once(`CLR:${d.requestId}`)) {
     return enqueue(m, 0, `CLR:${d.requestId}`, "CLEARANCE_REQUEST", clearanceTask(d), { requestId: d.requestId });
   }
-  if (m.from === "RADAR" && d.type === "BOUNDARY" && d.from === me && once(`BOUNDARY:${d.hex}:${d.from}:${session}`)) {
+  if (m.from === "RADAR" && d.type === "BOUNDARY" && d.from === me && once(`BOUNDARY:${d.hex}:${d.from}:${d.attempt ?? 1}:${session}`)) {
     return enqueue(m, 1, `BOUNDARY:${d.hex}`, "BOUNDARY", await boundaryTask(d));
   }
   if (m.from === "RADAR" && d.type === "CA" && once(`CA:${d.id}`)) {

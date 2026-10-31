@@ -16,8 +16,8 @@ import type {
   Status,
   TrafficEntry,
 } from "../../shared/types.ts";
-import { sectorOf } from "../../shared/geo.ts";
 import { evaluateConformance } from "../../shared/conformance.ts";
+import { mergeTraffic } from "../../shared/traffic.ts";
 
 const HANDOFF_DUE_MS = 30_000;
 const CONFLICT_DUE_MS = 30_000;
@@ -115,43 +115,31 @@ export class Airspace extends Actor {
     // A poll that started before an airport change must not write old traffic into the new session.
     if (session !== undefined && session !== this.session) return { ok: false, trackControl: {}, session: this.session };
 
-    const inBatch = new Set(batch.map((p) => p.hex));
-    const pendingHandoff = new Set(this.handoffs.filter((h) => h.state === "pending").map((h) => h.hex));
-
-    // Track control: keep existing owners, assign new aircraft by geometry, drop aircraft that left.
-    const tc: Record<string, Sector> = {};
-    for (const p of batch) {
-      const owner = this.trackControl[p.hex];
-      if (owner) tc[p.hex] = owner;
-      else if (!pendingHandoff.has(p.hex)) tc[p.hex] = sectorOf(p.lat, airport);
-    }
-    if (JSON.stringify(tc) !== JSON.stringify(this.trackControl)) this.trackControl = tc;
-
     const caHex = new Set<string>();
     for (const c of this.conflicts) if (isOpen(c)) { caHex.add(c.hexA); caHex.add(c.hexB); }
 
-    this.traffic = batch.map((p) => ({
-      hex: p.hex,
-      callsign: p.callsign,
-      typeCode: p.typeCode,
-      lat: p.lat,
-      lon: p.lon,
-      altFt: p.altFt,
-      vertRateFpm: p.vertRateFpm,
-      gsKt: p.gsKt,
-      trackTrueDeg: p.trackTrueDeg,
-      status: this.statuses[p.hex]?.status ?? "none",
-      sector: tc[p.hex] ?? null,
-      ca: caHex.has(p.hex),
-      ts: p.ts,
-      seenSec: p.seenSec,
-    }));
+    // Track control: keep existing owners, assign new aircraft by geometry. Aircraft with an active
+    // clearance that drop out of the batch stay as `coasting` (keeping track control) for 60 s after
+    // their last position; everything else that left is dropped (shared/traffic.ts).
+    const m = mergeTraffic({
+      airport,
+      batch,
+      prevTraffic: this.traffic,
+      trackControl: this.trackControl,
+      statuses: this.statuses,
+      pendingHandoffHex: new Set(this.handoffs.filter((h) => h.state === "pending").map((h) => h.hex)),
+      caHex,
+      now: Date.now(),
+    });
+    if (JSON.stringify(m.trackControl) !== JSON.stringify(this.trackControl)) this.trackControl = m.trackControl;
+    if (m.statuses !== this.statuses) this.statuses = m.statuses;
+    this.traffic = m.traffic;
 
-    // Pending handoffs for aircraft that left range are dropped.
-    const kept = this.handoffs.filter((h) => h.state !== "pending" || inBatch.has(h.hex));
+    // Pending handoffs for aircraft no longer on the scope (not even coasting) are dropped.
+    const kept = this.handoffs.filter((h) => h.state !== "pending" || m.present.has(h.hex));
     if (kept.length !== this.handoffs.length) this.handoffs = kept;
 
-    return { ok: true, trackControl: tc, session: this.session };
+    return { ok: true, trackControl: m.trackControl, session: this.session };
   }
 
   async setStatus(hex: string, status: Status, reason: string): Promise<{ ok: true }> {

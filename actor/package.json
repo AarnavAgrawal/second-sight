@@ -1,0 +1,8 @@
+{
+  "name": "second-sight-actor",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "terse-sdk": "0.14.9"
+  }
+}

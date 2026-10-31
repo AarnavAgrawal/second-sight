@@ -1,0 +1,9 @@
+{
+  "name": "@ss/shared",
+  "private": true,
+  "type": "module",
+  "main": "index.ts",
+  "dependencies": {
+    "geomagnetism": "^0.2.0"
+  }
+}

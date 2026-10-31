@@ -37,7 +37,7 @@ describe("spokenCallsign", () => {
     expect(spokenCallsign("N345AB")).toBe("November three four five alpha bravo");
   });
   test("unknown prefix spelled out", () => {
-    expect(spokenCallsign("XYZ123")).toBe("X-ray yankee zulu one two three");
+    expect(spokenCallsign("XYZ123")).toBe("X-ray Yankee Zulu one two three");
   });
 });
 

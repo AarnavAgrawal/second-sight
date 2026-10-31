@@ -174,9 +174,12 @@ export function spokenCallsign(callsign: string): string {
     const tel = TELEPHONY[prefix!];
     if (tel) return [tel, digitsGroupWords(num!), suffix ? spellOut(suffix) : ""].filter(Boolean).join(" ");
   }
-  // Unknown prefix: spelled phonetically; capitalize like a name ("Sierra India Mike one zero one").
-  const spelled = spellOut(cs);
-  return spelled.charAt(0).toUpperCase() + spelled.slice(1);
+  // Unknown prefix: spelled phonetically; capitalize the letters like a name ("Sierra India Mike one zero one").
+  const letters = new Set(Object.values(PHONETIC));
+  return spellOut(cs)
+    .split(" ")
+    .map((w) => (letters.has(w) ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+    .join(" ");
 }
 
 /** Spoken forms useful for matching transcripts (group form and individual-digit form). */

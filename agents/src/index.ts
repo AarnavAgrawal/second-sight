@@ -146,6 +146,12 @@ async function route(m: RelayMessage): Promise<void> {
       return enqueue(m, 1, `AP:${m.id}`, "APREQ_IN", await apreqInTask(m, d, round), { conflictId: id });
     }
     if (d.type === "APREQ_REPLY" && d.approved === true) {
+      // The approving sector usually posts the plan and resolves the CA itself; only take a turn if it didn't.
+      const c = d.conflictId ? (await getView()).conflicts.find((x) => x.id === d.conflictId) : undefined;
+      if (c && c.state === "resolved") {
+        console.log(`[${me}] APREQ approved for ${c.id}; already resolved by ${m.from}, no turn needed`);
+        return;
+      }
       return enqueue(m, 1, `AP:${m.id}`, "APREQ_APPROVED", apreqApprovedTask(m, d), { conflictId: d.conflictId });
     }
     return; // RADAR_CONTACT, UNABLE (handoff), INFO, ACK: no turn needed

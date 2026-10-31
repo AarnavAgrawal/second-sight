@@ -1,0 +1,20 @@
+{
+  "v": 4,
+  "createdOnFiles": { "v": 1, "at": "2026-10-31T21:20:00Z" },
+  "lists": "css",
+  "title": "Second Sight",
+  "order": ["cover", "why", "staffing", "what", "how", "actors", "relay", "superserve", "close"],
+  "sections": {
+    "s1": { "description": "Second Sight: an AI second set of eyes for air traffic controllers.", "start": "cover" },
+    "s2": { "description": "Why: one overloaded controller, no conflict alert, no line to the next sector.", "start": "why" },
+    "s3": { "description": "What: live AI sector controllers on real traffic for any US airport.", "start": "what" },
+    "s4": { "description": "How: Terse Durable Actors hold state, Agent Relay carries coordination, Superserve benchmarks against real controllers.", "start": "how" },
+    "s5": { "description": "Close.", "start": "close" }
+  },
+  "faces": {
+    "space-grotesk": { "family": "Space Grotesk", "href": "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400..700&display=swap" },
+    "ibm-plex-sans": { "family": "IBM Plex Sans", "href": "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" },
+    "jetbrains-mono": { "family": "JetBrains Mono", "href": "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" }
+  },
+  "designSystems": []
+}

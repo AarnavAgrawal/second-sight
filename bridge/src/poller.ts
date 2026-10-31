@@ -139,7 +139,7 @@ class Poller {
 
     await this.conformance(positions, snapState.statuses, tc);
     await this.conflicts(positions.filter((p) => !vfr.has(p.hex)), tc, snapState.conflicts, airport, now);
-    await this.boundaries(positions, tc, snapState.handoffs, airport);
+    await this.boundaries(positions.filter((p) => !vfr.has(p.hex)), tc, snapState.handoffs, airport);
   }
 
   /** Feed positions to Aircraft actors that have an active clearance. */
@@ -194,7 +194,15 @@ class Poller {
     airport: Airport,
     now: number,
   ) {
-    const preds = conflictAlert(positions, airport);
+    // Terminal-area rule: pairs where both aircraft are in the approach/departure corridor
+    // (within 6 NM of the field and below 3,000 ft AGL) are parallel-runway traffic, not conflicts.
+    const inCorridor = (p: Position) =>
+      haversineNm(p.lat, p.lon, airport.lat, airport.lon) < 6 && (p.altFt ?? 0) < airport.elevationFt + 3000;
+    const preds = conflictAlert(positions, airport).filter((c) => {
+      const a = this.latest.get(c.hexA);
+      const b = this.latest.get(c.hexB);
+      return !(a && b && inCorridor(a) && inCorridor(b));
+    });
     const predicted = new Set(preds.map((p) => pairKey(p.hexA, p.hexB)));
     const open = existing.filter((c) => c.state !== "resolved");
 

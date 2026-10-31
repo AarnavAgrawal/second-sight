@@ -7,7 +7,7 @@
     "build:airports": "bun scripts/build-airports.ts",
     "bridge": "bun bridge/src/index.ts",
     "agent": "bun agents/src/index.ts",
-    "web": "bun --cwd web run dev",
+    "web": "bun run --cwd web dev",
     "test": "bun test shared"
   },
   "devDependencies": {

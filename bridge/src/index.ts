@@ -3,7 +3,8 @@ import { airspace, grant, type ActorName } from "../../shared/adapters/actors.ts
 import { resolveAirport } from "./airports.ts";
 import { config, type DataSource } from "./config.ts";
 import { poller } from "./poller.ts";
-import { initRelay, postAs, postRadar, relayUp } from "./radar.ts";
+import { configureClearanceWorkflow } from "../../mastra/src/workflows/clearance.ts";
+import { cicRelay, initRelay, postAs, postRadar, relayUp } from "./radar.ts";
 import { extraRoutes } from "./routes.ts";
 
 const CORS = {
@@ -108,6 +109,7 @@ console.log(`[bridge] http://localhost:${config.port}  data source: ${config.dat
 
 // Startup: connect Relay, then resume the active airport (or DEFAULT_AIRPORT).
 await initRelay();
+configureClearanceWorkflow({ relay: cicRelay() });
 try {
   const { airport, session } = await airspace().getAirport();
   if (airport) {

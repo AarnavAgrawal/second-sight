@@ -44,3 +44,18 @@ bun run web                                          # UI on :5173
 - Backend check without a UI: `bun scripts/backend-check.ts`.
 - Replay demo scenario (KSFO): `bun scripts/scenario-check.ts 3 120` runs it three times and prints the timeline.
 - `CLEARANCE_MODE=direct bun run bridge` lets the probe decide clearances when the agent processes aren't running.
+
+## Shadow evaluation (real controller vs Second Sight)
+
+Open `http://localhost:5173/#/eval/KSFO` (or **Evaluation** in the header). For each clearance the real NorCal Approach
+controller gave, it shows what Second Sight would have ruled at that moment of recorded traffic and what the aircraft
+actually flew.
+
+- **ADS-B recordings** for 18:47-20:32Z are committed in `data/recordings/KSFO/`.
+- **Heard transmissions** (transcribed LiveATC audio) live in the local `EvalLog` actor and are not in this public repo.
+  To view them on another machine, copy `data/eval/KSFO/heard.jsonl` over (export it with
+  `bun run listener:export KSFO`). The bridge loads it automatically on the first `/eval` request, or run
+  `bun run listener:import KSFO`.
+- To rebuild from audio: put LiveATC archive MP3s in `data/recordings/KSFO/`, then
+  `bun run listener backfill KSFO` (transcribes in a Superserve sandbox; needs `SUPERSERVE_API_KEY` and a
+  `second-sight-openai` secret), `bun run listener pull KSFO`, `bun run listener:parse KSFO`.

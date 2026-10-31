@@ -19,7 +19,9 @@
     "test": "bun test shared bridge mastra",
     "listener": "bun listener/src/index.ts",
     "listener:parse": "bun listener/src/parse.ts",
-    "listener:match": "bun listener/src/match.ts"
+    "listener:match": "bun listener/src/match.ts",
+    "listener:export": "bun listener/src/seed.ts export",
+    "listener:import": "bun listener/src/seed.ts import"
   },
   "devDependencies": {
     "bun-types": "^1.4.4",

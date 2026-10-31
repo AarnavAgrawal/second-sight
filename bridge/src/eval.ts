@@ -5,6 +5,7 @@ import { evalLog } from "../../shared/adapters/actors.ts";
 import { normalizeAdsb } from "../../shared/adsb.ts";
 import type { Airport, EvalReport, Position } from "../../shared/types.ts";
 import { evaluate, type EvalSnapshot } from "../../mastra/src/eval/evaluate.ts";
+import { importHeard } from "../../listener/src/seed.ts";
 import { resolveAirport } from "./airports.ts";
 import { config, repoPath } from "./config.ts";
 import { caPairAllowed, discreteSquawkSet, dropShadows } from "./filters.ts";
@@ -44,8 +45,11 @@ export async function evalRoute(req: Request, url: URL): Promise<Response | null
   if ("error" in r) return json(r, 404);
   const airport = r.airport;
   const t0 = Date.now();
-  const [{ snapshots, discrete }, heard] = await Promise.all([loadSnapshots(airport.icao, airport), evalLog(airport.icao).heard(0, Number.MAX_SAFE_INTEGER)]);
-  if (!heard.length) return json({ error: `No heard transmissions for ${airport.icao}. Run the listener first (bun run listener backfill ${airport.icao}).` }, 404);
+  let heard = await evalLog(airport.icao).heard(0, Number.MAX_SAFE_INTEGER);
+  // Fresh machine: EvalLog is local SQLite, so load the exported seed (data/eval/<ICAO>/heard.jsonl) if there is one.
+  if (!heard.length && (await importHeard(airport.icao)) > 0) heard = await evalLog(airport.icao).heard(0, Number.MAX_SAFE_INTEGER);
+  const { snapshots, discrete } = await loadSnapshots(airport.icao, airport);
+  if (!heard.length) return json({ error: `No heard transmissions for ${airport.icao}. Run the listener (bun run listener backfill ${airport.icao}) or add data/eval/${airport.icao}/heard.jsonl from the machine that has it (bun run listener:export ${airport.icao}).` }, 404);
   const heardFrom = Math.min(...heard.map((h) => h.ts));
   const heardTo = Math.max(...heard.map((h) => h.ts)) + 1;
   const fromTs = Number(url.searchParams.get("from")) || heardFrom;

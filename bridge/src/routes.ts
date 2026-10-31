@@ -2,10 +2,12 @@
 import { airspace } from "../../shared/adapters/actors.ts";
 import { runClearance } from "../../mastra/src/workflows/clearance.ts";
 import { buildKeyterms, speak, transcribe, voiceConfigured } from "./voice.ts";
+import { evalRoute } from "./eval.ts";
 
 const j = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
 export async function extraRoutes(req: Request, url: URL): Promise<Response | null> {
+  if (url.pathname.startsWith("/eval/")) return evalRoute(req, url);
   if (req.method === "POST" && url.pathname === "/clearance") {
     const body = (await req.json().catch(() => ({}))) as {
       text?: string;

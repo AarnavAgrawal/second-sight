@@ -19,3 +19,7 @@ data/recordings/**/*.mp3
 .DS_Store
 .superserve-sandbox
 data/atc/
+# ADS-B recordings behind the shadow evaluation (#/eval/KSFO), 18:47-20:32Z (adsb.lol data)
+!data/recordings/KSFO/20261031-114726.jsonl
+!data/recordings/KSFO/20261031-120749.jsonl
+!data/recordings/KSFO/20261031-121012.jsonl

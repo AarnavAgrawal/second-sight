@@ -7,4 +7,4 @@ This folder is a source copy: `deck.json` (slide order, fonts) and one `slides/<
 - `staffing.html` uses a controller photo that isn't committed here (unknown license). It only exists in the live deck.
 - `reconstruction.png`: Anynobody, CC BY-SA 4.0, Wikimedia Commons.
 - Sponsor logos are from each sponsor's website.
-- `scope.png`, `scopemap.png`, `relayfeed.png`, `evaltop.png` are screenshots of Second Sight on live KSFO traffic, Oct 31, 2026.
+- `scope.png`, `scopemap.png`, `relayfeed.png`, `eval.webp` are screenshots of Second Sight on live KSFO traffic, Oct 31, 2026.

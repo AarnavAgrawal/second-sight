@@ -279,9 +279,13 @@ export function workspaceInfo(): { workspaceId: string; name: string; observerHi
   return {
     workspaceId: f.workspaceId,
     name: f.workspaceName,
-    observerHint:
-      "Open https://agentrelay.com/observer/login and paste the workspaceKey from .relay-identities.json " +
-      "(or an observer token from createObserverToken()).",
+    // Verified Oct 31: the hosted Observer only accepts cast.agentrelay.com credentials (rk_live_/ot_live_);
+    // it rejects armadillo workspace keys and observer tokens server-side. Use the in-app Relay feed instead.
+    observerHint: f.baseUrl.includes("cast.agentrelay.com")
+      ? "Open https://agentrelay.com/observer?key=<ot_live_ observer token from createObserverToken()> (auto-login)."
+      : "The hosted Observer only supports cast.agentrelay.com workspaces; this workspace is on " +
+        f.baseUrl +
+        ". Show coordination in the app's Relay feed (Airspace.feed).",
   };
 }
 

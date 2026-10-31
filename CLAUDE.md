@@ -182,6 +182,7 @@ The airport is chosen at runtime in the UI and stored in the `Airspace` actor. I
 ```
 second-sight/
   CLAUDE.md
+  API.md                     Backend ↔ frontend contract (endpoints, actor state shapes, UI display rules). Source of truth.
   actor/                     Terse actor project (Airspace, Aircraft)
   bridge/                    Bun service: ADS-B poller, replay, conflict alert, HTTP API, RADAR identity on Relay
   agents/                    Bun agent runner: one process per agent, chosen by CLI arg; wires Relay to Mastra agents
@@ -243,10 +244,12 @@ ProbeResult    { ok: boolean, reasons: string[], conflicts: { with: callsign, mi
 AircraftState  { hex, callsign, clearance|null, track: Position[] (last 24), status, statusReason, sector }
 Status         "none" | "pending" | "conforming" | "non_conforming" | "coasting"
 Handoff        { hex, callsign, from, to, startedAt, dueAt, state: "pending" | "accepted" | "unable" | "overdue" }
-ConflictAlert  { id, a: callsign, b: callsign, sectors: [s1, s2], predictedLatNm, predictedVertFt, inSec,
+ConflictAlert  { id, a: callsign, aHex, b: callsign, bHex, sectors: [s1, s2], predictedLatNm, predictedVertFt, inSec,
                  state: "active" | "coordinating" | "resolved" | "escalated", resolution?: string, dueAt }
-FeedItem       { ts, from, to|channel, text }
+FeedItem       { id, ts, from, to|channel, text }
 ```
+
+**`API.md` section 2 has the exact TypeScript types and wins over this summary.** Anything the UI sees (endpoints, actor state, WebSocket messages) must match `API.md`. Changing it needs both teammates to agree.
 
 ADS-B notes: readsb-style JSON with an `ac` array. Expect fields like `hex`, `flight` (callsign, padded with spaces), `r` (registration), `t` (ICAO type), `lat`, `lon`, `alt_baro` (number, or the string `"ground"`), `gs`, `track`, `baro_rate`, `seen`. **Verify against one real response before coding the parser.** Drop aircraft on the ground, below 1,000 ft above field elevation, or with `seen > 30`.
 

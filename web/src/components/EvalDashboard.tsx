@@ -357,7 +357,7 @@ function Method({ r }: { r: EvalReport }) {
       <ul>
         <li>
           <b>Heard:</b> {r.coverage.heard} transmissions split at squelch gaps and transcribed (gpt-4o-transcribe) in a Superserve sandbox, then parsed
-          into speaker, callsign and clearance. Callsigns are matched against ADS-B at that moment; unmatched ones are not scored.
+          into speaker, callsign and clearance. Callsigns are matched against everything on ADS-B within ±150 s: the parser's pick is kept only if it fits the spoken airline and flight number, then a deterministic matcher (group-form numbers, one-digit slips, abbreviated callsigns, pilot readbacks) fills the rest. Unmatched ones are not scored.
         </li>
         <li>
           <b>Second Sight would:</b> the same facts packet the sector agents get (probe, safe candidates, flight phase, recent clearance, sector entry),

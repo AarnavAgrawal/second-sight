@@ -3,12 +3,13 @@
 //   bun run listener status                      progress of the sandbox jobs
 //   bun run listener pull <ICAO>                 copy transcripts to data/atc/<ICAO>/transmissions.jsonl
 // The sandbox id lives in .superserve-sandbox. The OpenAI key is a Superserve secret: the sandbox only sees a stand-in token.
+import { fileURLToPath } from "node:url";
 import { Sandbox, Secret } from "@superserve/sdk";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename } from "node:path";
 import { spokenCallsign } from "../../shared/telephony.ts";
 
-const ROOT = new URL("../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../", import.meta.url)); // not .pathname: breaks on Windows paths
 const ID_FILE = `${ROOT}.superserve-sandbox`;
 const SECRET = "second-sight-openai";
 const WORK = "/work";

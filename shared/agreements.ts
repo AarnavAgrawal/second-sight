@@ -86,7 +86,7 @@ export function recentConflictingClearance(
   const ageMs = now - prev.issuedAt;
   if (ageMs >= RECENT_CLEARANCE_SEC * 1000) return null;
   const secondsAgo = Math.max(0, Math.round(ageMs / 1000));
-  const ago = `${secondsAgo} s ago`;
+  const ago = secondsAgo < 10 ? "moments ago" : `${secondsAgo} s ago`;
 
   if (requested.kind === "altitude") {
     if (currentAltFt != null) {

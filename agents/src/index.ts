@@ -34,6 +34,8 @@ const other: Sector | null = me === "NORTH" ? "SOUTH" : me === "SOUTH" ? "NORTH"
 const MAX_STEPS = 5; // 4 tool rounds + final answer
 const REVIEW_STEPS = 4; // submit_review, a possible corrected retry, final answer
 const STALE_MS = 60_000;
+/** Reasoning effort for review/point-out turns (OpenAI reasoning models). Empty string = model default. */
+const FAST_EFFORT = (process.env.REVIEW_REASONING_EFFORT ?? "low").trim();
 /** The workflow waits ~8 s for a REVIEW and ~8 s for a point out reply; past this a turn is pointless. */
 const REVIEW_MAX_AGE_MS = 15_000;
 
@@ -71,6 +73,8 @@ const nonconfHistory = new Map<string, number[]>();
 type Data = Record<string, any>;
 const dataOf = (m: RelayMessage): Data => (m.data ?? {}) as Data;
 const sp = (cs: string) => spokenCallsign(cs);
+/** "moments ago" / "thirty seconds ago" (spoken style for confirm questions). */
+const agoText = (sec: number) => (sec < 10 ? "moments ago" : `${Math.round(sec / 5) * 5} seconds ago`);
 const once = (key: string) => {
   const now = Date.now();
   for (const [k, t] of seen) if (now - t > 10 * 60_000) seen.delete(k);
@@ -193,7 +197,14 @@ function enqueue(m: RelayMessage, priority: number, key: string, type: string, t
   enqueueJob({ key, msg: m, type, priority, enqueuedAt: Date.now(), task, ...extra });
 }
 
+/** Fast, read-mostly turns that must answer within the workflow's timeout run immediately, alongside the queue. */
+const IMMEDIATE = new Set(["CLEARANCE_REVIEW", "POINT_OUT"]);
+
 function enqueueJob(job: Job) {
+  if (IMMEDIATE.has(job.type)) {
+    void runTurn(job).catch((e) => console.error(`[${me}] ${job.key} failed:`, (e as Error).message));
+    return;
+  }
   queue.push(job);
   queue.sort((a, b) => a.priority - b.priority || a.enqueuedAt - b.enqueuedAt);
   void work();
@@ -267,7 +278,7 @@ Decision guide:
 - issue: safe, breaks no agreement, no recent contradiction, stays in your sector. phraseology exactly "${d.requestedPhraseology}".
 - unable: unsafe, breaks an agreement, or a CIC directive forbids it. Pick the BEST candidate, preferences in order: (1) no breaks_agreement tag; (2) no enters_other_sector_120s unless nothing else; (3) departure: prefer keeps_climb, avoid stopping a departure's climb low; (4) arrival: prefer altitude changes over large turns, and toward_airport; (5) overflight: smallest deviation; (6) avoid large_deviation when a smaller safe option exists. phraseology like "Unable, ${sp(cs)} ${whatText(req)}, <the deciding fact>. Suggest <the chosen candidate's clearance>."
 - coordinate: safe but enters the other sector. coordinationMessage exactly: "${pointOutText(cs, req, facts.sectorEntry, view)}" phraseology: "${sp(cs)}, pointing out to ${other}, stand by."
-- confirm: a recent conflicting clearance, or an agreement the CIC may not know about. question like ${recent ? `"Confirm, ${sp(cs)} was cleared ${whatText(recent.clearance)} ${Math.round(recent.secondsAgo)} seconds ago?"` : `"Confirm, ${sp(cs)} is restricted by coordination with ${other}: <agreement>. Cancel the restriction?"`} phraseology = the question.
+- confirm: a recent conflicting clearance, or an agreement the CIC may not know about. question like ${recent ? `"Confirm, ${sp(cs)} was cleared ${whatText(recent.clearance)} ${agoText(recent.secondsAgo)}?"` : `"Confirm, ${sp(cs)} is restricted by coordination with ${other}: <agreement>. Cancel the restriction?"`} phraseology = the question.
 - reason: one or two sentences naming the deciding facts, e.g. "Keeps the departure climbing and stays out of ${other}'s airspace."
 Task: call submit_review exactly once. If it returns ok:false, fix the problem and call it again. Do not call any other action tools. Then stop.`;
   return job(m, 0, `REV:${d.requestId}`, "CLEARANCE_REVIEW", task, {
@@ -600,18 +611,21 @@ async function runTurn(job: Job) {
     review: null,
   };
   job.setup?.(ctx);
-  turn.ctx = ctx;
   const t0 = Date.now();
   const prompt = `Event from ${job.msg.from} to ${job.msg.to}: "${job.msg.text}"
 ${job.task}`;
   let text = "";
   try {
-    const res = await agent.generate(prompt, { maxSteps: job.maxSteps ?? MAX_STEPS });
+    const res = await agent.generate(prompt, {
+      maxSteps: job.maxSteps ?? MAX_STEPS,
+      requestContext: turn.requestContext(ctx),
+      // Reviews and point outs are bounded choices over precomputed facts: keep reasoning short so they
+      // answer inside the workflow's timeout. Other turns use the model's default effort.
+      ...(IMMEDIATE.has(job.type) && FAST_EFFORT ? { providerOptions: { openai: { reasoningEffort: FAST_EFFORT } } } : {}),
+    });
     text = (res.text || "").trim();
   } catch (e) {
     console.error(`[${me}] turn ${job.key} failed:`, (e as Error).message);
-  } finally {
-    turn.ctx = null;
   }
   for (const m of ctx.sent) remember(m);
   // Count our own APREQ messages toward the two-round limit.

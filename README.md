@@ -16,6 +16,13 @@ Second Sight is meant to *assist* overloaded controllers with conformance monito
 
 **Terse Durable Actors hold all state.** One `Airspace` actor owns the airport, traffic, track control, handoffs, conflict alerts, and feed; each aircraft with a clearance is an `Aircraft` actor with its own conformance timer. Actors process one call at a time, so an aircraft can never be under two sectors' control during a handoff. **The bridge** polls ADS-B every 5 s, pushes traffic to the actors, runs the deterministic conflict alert and boundary detection, and posts machine events to Agent Relay as `RADAR`. **Mastra runs the agents and the clearance pipeline:** NORTH, SOUTH, and MONITOR are Mastra agents (OpenAI models via the Mastra model router) in separate processes with typed tools over the actors; every clearance runs a Mastra workflow (parse → resolve → probe → sector review → result). **Agent Relay carries all coordination**: handoffs, APREQs, and alerts are Relay DMs and channel posts. Rules compute facts (geometry, separation, conformance, probes, track control are plain tested code in `shared/`); the LLM only parses speech and decides how to phrase and coordinate.
 
+### The AI controllers ("You talk to the aircraft. Math guarantees separation. The AI does what a second controller does: chooses, remembers, and coordinates.")
+
+- **Math answers "is it safe?"** Separation, probes, conformance, and every option the AI may pick are plain tested code in `shared/` (`generateCandidates`, `flightPhase`, `checkAgreements`, `recentConflictingClearance`, `sectorEntry`).
+- **The AI answers "is it the right call?"** For each CIC clearance the owning sector agent gets a facts packet and must `submit_review`: **issue**, **unable** (choosing the best math-validated candidate by id, with a reason such as "keeps the departure climbing"), **confirm** (a contradicting clearance moments ago, or a coordination agreement the CIC may not know about), or **coordinate** (a point out to the other sector, issued only after "point out approved").
+- **Memory lives in the actors:** APREQ plans and conditional handoffs become `agreements`; CIC instructions in `#cic` become `directives`. Agents get both in every decision.
+- **Safety rule:** agents only pick candidate ids; tools and the workflow validate and re-probe. If an agent times out or returns something invalid, a deterministic fallback decides and says so (`review.by: "FALLBACK"`, posted to `#cic`). Protocol: [`docs/ai-protocol.md`](docs/ai-protocol.md).
+
 ## Run
 
 Requires Bun 1.4.2+ and, on Windows, WSL 2 Ubuntu for the Terse local runtime. Copy `.env.example` to `.env` and set `OPENAI_API_KEY` (and `DEEPGRAM_API_KEY` for voice). `LLM_PROVIDER=anthropic` with `ANTHROPIC_API_KEY` switches the agents to Claude.
@@ -29,7 +36,10 @@ bun run agent MONITOR
 bun run web                                          # UI on :5173
 ```
 
+- `bun run backend` starts the bridge and all three agents in one terminal (prefixed logs).
 - Frontend API contract: [`docs/API.md`](docs/API.md).
+- AI behavior check (smart option, issue, confirm, coordinate/point out, say again, agreements): `bun scripts/ai-check.ts replay`.
+- Record traffic for replay: `bun scripts/record.ts KSFO 20`; check a scenario offline: `bun scripts/scenario-offline.ts KSFO`.
 - Unit tests: `bun test shared` (separation, probe, conformance, phraseology, telephony, airports).
 - Backend check without a UI: `bun scripts/backend-check.ts`.
 - Replay demo scenario (KSFO): `bun scripts/scenario-check.ts 3 120` runs it three times and prints the timeline.

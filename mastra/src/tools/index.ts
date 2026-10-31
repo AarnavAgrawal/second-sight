@@ -1,6 +1,8 @@
 // Mastra tools for the sector controller and monitor agents. Thin wrappers over the actor client,
 // shared/ logic, and the Relay adapter. Safety rules are enforced here in code, not by the model:
 // agents pick math-generated candidate ids; tools validate ids and re-probe before acting.
+import { AsyncLocalStorage } from "node:async_hooks";
+import { RequestContext } from "@mastra/core/request-context";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import { airspace } from "../../../shared/adapters/actors.ts";
@@ -45,11 +47,43 @@ export interface TurnContext {
   proposedKey?: string;
 }
 
-export const turn: { ctx: TurnContext | null } = { ctx: null };
-const ctx = () => {
-  if (!turn.ctx) throw new Error("No active turn.");
-  return turn.ctx;
+// Per-turn context. Several turns can run at once (clearance reviews and point outs run alongside the queue),
+// so the context travels with each generate() call in Mastra's requestContext, and every tool execution is
+// wrapped to make it the ambient context (AsyncLocalStorage) for the ctx() helper below.
+const TURN_KEY = "secondSightTurn";
+const ambient = new AsyncLocalStorage<TurnContext>();
+export const turn = {
+  /** Build the requestContext to pass to agent.generate(prompt, { requestContext }). */
+  requestContext(c: TurnContext): RequestContext {
+    const rc = new RequestContext();
+    rc.set(TURN_KEY, c);
+    return rc;
+  },
+  get ctx(): TurnContext | null {
+    return ambient.getStore() ?? null;
+  },
 };
+const ctx = () => {
+  const c = ambient.getStore();
+  if (!c) throw new Error("No active turn.");
+  return c;
+};
+
+/** Make each tool run with its call's TurnContext as the ambient context. */
+function bindTurn<T extends Record<string, unknown>>(tools: T): T {
+  for (const tool of Object.values(tools) as { execute?: (input: unknown, context: unknown) => Promise<unknown> }[]) {
+    const original = tool.execute;
+    if (!original || (original as { __bound?: boolean }).__bound) continue;
+    const bound = (input: unknown, context: unknown) => {
+      const rc = (context as { requestContext?: { get(k: string): unknown } } | undefined)?.requestContext;
+      const c = (rc?.get?.(TURN_KEY) as TurnContext | undefined) ?? ambient.getStore();
+      return c ? ambient.run(c, () => original.call(tool, input, context)) : original.call(tool, input, context);
+    };
+    (bound as { __bound?: boolean }).__bound = true;
+    tool.execute = bound;
+  }
+  return tools;
+}
 
 const SectorEnum = z.enum(["NORTH", "SOUTH"]);
 const KindEnum = z.enum(["altitude", "heading"]);
@@ -502,7 +536,7 @@ export const postTool = createTool({
   },
 });
 
-export const sectorTools = {
+export const sectorTools = bindTurn({
   get_sector_picture: getSectorPicture,
   probe_clearance: probeClearanceTool,
   get_candidates: getCandidates,
@@ -519,10 +553,10 @@ export const sectorTools = {
   reply_point_out: replyPointOut,
   send_dm: sendDm,
   post: postTool,
-};
+});
 
-export const monitorTools = {
+export const monitorTools = bindTurn({
   get_sector_picture: getSectorPicture,
   send_dm: sendDm,
   post: postTool,
-};
+});

@@ -6,6 +6,7 @@ import { alternativeOf, ClearanceResultSchema, finish, log, type Flow } from "./
 const base = (over: Partial<Flow> = {}): Flow => ({
   text: "Southwest twenty-one forty, descend and maintain four thousand",
   override: false,
+  confirmed: false,
   parsed: null,
   hex: null,
   callsign: null,
@@ -13,6 +14,10 @@ const base = (over: Partial<Flow> = {}): Flow => ({
   currentAltFt: null,
   phraseology: null,
   probe: null,
+  facts: null,
+  review: null,
+  reviewBy: null,
+  pointOut: null,
   steps: [],
   final: null,
   progressToken: null,

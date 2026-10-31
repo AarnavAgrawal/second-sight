@@ -116,9 +116,17 @@ export declare namespace actors {
                 Args: Parameters<Stub["acceptHandoff"]>
                 Result: Awaited<ReturnType<Stub["acceptHandoff"]>>
             }
+            ["addAgreement"]: {
+                Args: Parameters<Stub["addAgreement"]>
+                Result: Awaited<ReturnType<Stub["addAgreement"]>>
+            }
             ["addAlert"]: {
                 Args: Parameters<Stub["addAlert"]>
                 Result: Awaited<ReturnType<Stub["addAlert"]>>
+            }
+            ["addDirective"]: {
+                Args: Parameters<Stub["addDirective"]>
+                Result: Awaited<ReturnType<Stub["addDirective"]>>
             }
             ["appendFeed"]: {
                 Args: Parameters<Stub["appendFeed"]>
@@ -132,6 +140,14 @@ export declare namespace actors {
                 Args: Parameters<Stub["configure"]>
                 Result: Awaited<ReturnType<Stub["configure"]>>
             }
+            ["expireAgreement"]: {
+                Args: Parameters<Stub["expireAgreement"]>
+                Result: Awaited<ReturnType<Stub["expireAgreement"]>>
+            }
+            ["expireDirective"]: {
+                Args: Parameters<Stub["expireDirective"]>
+                Result: Awaited<ReturnType<Stub["expireDirective"]>>
+            }
             ["getAirport"]: {
                 Args: Parameters<Stub["getAirport"]>
                 Result: Awaited<ReturnType<Stub["getAirport"]>>
@@ -143,6 +159,10 @@ export declare namespace actors {
             ["initiateHandoff"]: {
                 Args: Parameters<Stub["initiateHandoff"]>
                 Result: Awaited<ReturnType<Stub["initiateHandoff"]>>
+            }
+            ["logClearance"]: {
+                Args: Parameters<Stub["logClearance"]>
+                Result: Awaited<ReturnType<Stub["logClearance"]>>
             }
             ["raiseConflict"]: {
                 Args: Parameters<Stub["raiseConflict"]>
@@ -181,9 +201,17 @@ export declare namespace actors {
                 type Args = $MethodTypes["acceptHandoff"]["Args"]
                 type Result = $MethodTypes["acceptHandoff"]["Result"]
             }
+            namespace addAgreement {
+                type Args = $MethodTypes["addAgreement"]["Args"]
+                type Result = $MethodTypes["addAgreement"]["Result"]
+            }
             namespace addAlert {
                 type Args = $MethodTypes["addAlert"]["Args"]
                 type Result = $MethodTypes["addAlert"]["Result"]
+            }
+            namespace addDirective {
+                type Args = $MethodTypes["addDirective"]["Args"]
+                type Result = $MethodTypes["addDirective"]["Result"]
             }
             namespace appendFeed {
                 type Args = $MethodTypes["appendFeed"]["Args"]
@@ -197,6 +225,14 @@ export declare namespace actors {
                 type Args = $MethodTypes["configure"]["Args"]
                 type Result = $MethodTypes["configure"]["Result"]
             }
+            namespace expireAgreement {
+                type Args = $MethodTypes["expireAgreement"]["Args"]
+                type Result = $MethodTypes["expireAgreement"]["Result"]
+            }
+            namespace expireDirective {
+                type Args = $MethodTypes["expireDirective"]["Args"]
+                type Result = $MethodTypes["expireDirective"]["Result"]
+            }
             namespace getAirport {
                 type Args = $MethodTypes["getAirport"]["Args"]
                 type Result = $MethodTypes["getAirport"]["Result"]
@@ -208,6 +244,10 @@ export declare namespace actors {
             namespace initiateHandoff {
                 type Args = $MethodTypes["initiateHandoff"]["Args"]
                 type Result = $MethodTypes["initiateHandoff"]["Result"]
+            }
+            namespace logClearance {
+                type Args = $MethodTypes["logClearance"]["Args"]
+                type Result = $MethodTypes["logClearance"]["Result"]
             }
             namespace raiseConflict {
                 type Args = $MethodTypes["raiseConflict"]["Args"]

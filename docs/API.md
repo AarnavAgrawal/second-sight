@@ -71,6 +71,7 @@ Request:
 {
   "text": "Southwest twenty-one forty, descend and maintain four thousand",  // transcript or typed text
   "override": false,              // optional: CIC override (skips sector review, logged to #cic + alerts)
+  "confirmed": false,             // optional: resend with true after the CIC answers a "needsConfirm" question
   "selectedHex": "a1b2c3",        // optional: currently selected aircraft (parser prefers it on ambiguity)
   "clearance": {                  // optional: structured clearance, skips the LLM parse
     "callsign": "SWA2140", "kind": "altitude", "value": 4000          // (use for "Issue alternative")
@@ -94,14 +95,30 @@ Response (`ClearanceResult`):
   "probe": { "ok": false, "reasons": ["Traffic BYF21, 2.3 NM, 300 ft, in 10 s."], "conflicts": [ ... ] },
   "parsed": { ... }, "hex": "...", "sector": "NORTH", "steps": [ ... ] }
 
-// Couldn't parse / unknown callsign  (HTTP 422, same JSON body; all other outcomes are HTTP 200)
-{ "issued": false, "transcript": "...", "reason": "Say again. ...", "sayAgain": true, "suggestions": ["UAL123", "UAL1234"], "steps": [ ... ] }
+// Couldn't parse / unknown / ambiguous callsign  (HTTP 422, same JSON body; all other outcomes are HTTP 200)
+{ "issued": false, "transcript": "...", "reason": "Say again, which Southwest, twenty-one forty or twenty-one fifty-five?",
+  "sayAgain": true, "suggestions": ["SWA2140", "SWA2155"], "options": ["Southwest twenty-one forty", "Southwest twenty-one fifty-five"], "steps": [ ... ] }
 
-// Sector agent didn't answer within 8 s
-{ "issued": false, "reason": "No response from sector NORTH. CIC decides.", "alternative": ..., ... }
+// Sector asks the CIC to confirm (recent contradicting clearance, or it would break an agreement)
+{ "issued": false, "needsConfirm": true, "question": "Confirm, United one twenty-three was cleared to four thousand thirty seconds ago?",
+  "review": { "decision": "confirm", "by": "NORTH", "reason": "Reverses the descent issued 30 s ago.", "question": "..." }, ... }
 ```
-- **Unable card:** show `reason`, `probe.reasons`; "Issue alternative" = `POST /clearance { text: alternative.text, clearance: alternative }`; "CIC override" = resend the original request with `override: true`.
-- `steps[].id` ∈ `parse | resolve | probe | sectorReview | issue`, `status` ∈ `ok | fail | skipped`.
+
+**AI review (`review`, every non-override response after the probe):** the owning sector controller agent chooses, from math-validated options only, and explains why:
+```jsonc
+"review": {
+  "decision": "issue" | "unable" | "confirm" | "coordinate",
+  "by": "NORTH" | "SOUTH" | "FALLBACK",       // FALLBACK = the agent timed out/was invalid; rules decided (also posted to #cic)
+  "reason": "Keeps the departure climbing instead of stopping it at five thousand.",   // show as "Why this option"
+  "question": "...",                          // for confirm
+  "pointOut": { "to": "SOUTH", "result": "approved" | "unable" | "no_response", "reason": "..." }   // for coordinate
+}
+```
+- `decision: "coordinate"`: the clearance would take the aircraft into the other sector within 120 s, so the sector sent a **point out** over Relay and waited for "point out approved" before issuing (the step list shows `coordinate`).
+- `alternative` on an Unable is the **candidate the agent chose** (`alternative.candidateId`); all safe candidates are in `probe.alternatives` (`Candidate[]`: `id, kind, value, turn?, phraseology, deviation, tags`).
+- **Unable card:** show `reason` (the spoken Unable), then **"Why this option": `review.reason`**, `probe.reasons`; "Issue alternative" = `POST /clearance { text: alternative.text, clearance: alternative }`; "CIC override" = resend the original request with `override: true`.
+- **Confirm card** for `needsConfirm`: show `question` with **Confirm** (resend the same request with `confirmed: true`; any agreement it breaks is cancelled by the CIC and posted to `#coord`) and **Cancel**.
+- `steps[].id` ∈ `parse | resolve | probe | context | sectorReview | coordinate | issue` (render unknown ids generically), `status` ∈ `ok | fail | skipped`. `sectorReview` with `fail` + "Fallback used" means the rules decided.
 - `sector` picks the voice for speaking an Unable reply.
 - Every issued clearance also appears in the feed in `#cic` (from the sector agent, or from `CIC` in direct mode and for overrides).
 
@@ -153,12 +170,18 @@ Apply `state`, then shallow-merge each `state_update.changes` (each changed top-
   conflicts: ConflictAlert[];              // open (active | coordinating | escalated) + last 10 resolved
   feed: FeedItem[];                        // last 100 Relay messages, oldest first
   alerts: AlertItem[];                     // last 20: NONCONF | CA | HANDOFF_OVERDUE | ESCALATED | OVERRIDE | INFO
+  agreements: Agreement[];                 // coordination memory: active + last 10 expired/cancelled (see below)
+  directives: Directive[];                 // CIC directives to sectors: active + last 10 expired
+  clearanceLog: ClearanceLogEntry[];       // last 20 issued clearances { ts, hex, callsign, kind, value, turn?, phraseology, issuedBy }
 }
 ```
 `TrafficEntry` = `{ hex, callsign, typeCode, lat, lon, altFt, vertRateFpm, gsKt, trackTrueDeg, status, sector, ca, ts, seenSec }`.
 
 - **Data block:** line 1 `callsign`; line 2 = altitude in hundreds (3 digits) + `↑` if `vertRateFpm > 500` / `↓` if `< -500` + ground speed in tens: `078↑ 28`. Helper: `dataBlock(altFt, vertRateFpm, gsKt)` in `shared/format.ts`.
 - **Status colors:** `none` white, `pending` amber, `conforming` green, `non_conforming` red, `coasting` gray + `CST`.
+- **Agreements** (`Agreement` in shared/types.ts): `{ id, hex, callsign, constraint: { kind, op: "maintain"|"at_or_below"|"at_or_above", value }, between, source: "APREQ"|"handoff"|"CIC", text, createdAt, expiresAt, state: "active"|"expired"|"cancelled" }`. Created when sectors agree an APREQ plan or accept a handoff with a condition; a later clearance that breaks one comes back Unable or Confirm. Left-panel "Agreements" list: `callsign`, `text`, who (`source`/`between`), time left (`expiresAt - now`) for `state === "active"`.
+- **Directives** (`Directive`): `{ id, target: "NORTH"|"SOUTH"|"ALL", text, rule?: { type: "no_handoffs"|"altitude_cap"|"altitude_floor"|"other", value? }, createdAt, expiresAt, state }`. Stored when the CIC addresses a sector in `#cic` ("SOUTH, stop accepting handoffs for two minutes"). Left-panel "Directives" list for `state === "active"`.
+- **Estimated phase** (departure/arrival/overflight) appears in the review facts and agent reasons; label it "estimated phase" in the UI (heuristic, not a flight plan).
 - **Coasting tracks:** an aircraft with an active clearance (status not `none`) that drops out of the ADS-B feed stays in `traffic` with its **last known** position/altitude/`ts`/`seenSec` and `status: "coasting"`, keeping its `sector`/`trackControl`, until 60 s after its last `ts`; then it is removed. Its age is `Date.now() - ts` (the entry is not dead-reckoned). If it reappears, the fresh entry replaces it and its status returns to the conformance result on the next poll. Aircraft without a clearance still disappear as soon as they leave the feed.
 - **Sector tint:** `sector` (= `trackControl[hex]`).
 - **CA:** `ca: true` → red `CA` on the data block; draw a line between `hexA`/`hexB` of each open conflict.

@@ -10,6 +10,7 @@ export async function extraRoutes(req: Request, url: URL): Promise<Response | nu
     const body = (await req.json().catch(() => ({}))) as {
       text?: string;
       override?: boolean;
+      confirmed?: boolean;
       selectedHex?: string | null;
       clearance?: { callsign: string; kind: "altitude" | "heading"; value: number; turn?: "left" | "right" };
     };
@@ -18,6 +19,7 @@ export async function extraRoutes(req: Request, url: URL): Promise<Response | nu
     const input = {
       text: text || `${body.clearance!.callsign} ${body.clearance!.kind} ${body.clearance!.value}`,
       override: !!body.override,
+      confirmed: !!body.confirmed,
       selectedHex: body.selectedHex ?? null,
       ...(body.clearance ? { clearance: body.clearance } : {}),
     };

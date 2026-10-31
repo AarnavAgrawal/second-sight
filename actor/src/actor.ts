@@ -4,11 +4,14 @@
 // Actors process one call at a time, so track control can never be split during a handoff.
 import { Actor, Emittable, Persisted } from "terse-sdk/actor";
 import type {
+  Agreement,
   AlertItem,
   Airport,
   Clearance,
+  ClearanceLogEntry,
   ConflictAlert,
   ConflictState,
+  Directive,
   FeedItem,
   Handoff,
   Position,
@@ -27,6 +30,10 @@ const RESOLVED_KEEP = 10;
 const HANDOFFS_KEEP = 20;
 const TRACK_MAX = 24;
 const AIRCRAFT_RECHECK_MS = 10_000;
+const AGREEMENT_DEFAULT_SEC = 300;
+const DIRECTIVE_DEFAULT_SEC = 300;
+const EXPIRED_KEEP = 10;
+const CLEARANCE_LOG_MAX = 20;
 
 type Fail = { ok: false; error: string };
 const fail = (error: string): Fail => ({ ok: false, error });
@@ -57,6 +64,12 @@ export class Airspace extends Actor {
   @Persisted @Emittable session = 0;
   /** Conformance status per hex, merged into `traffic` on every poll. */
   @Persisted statuses: Record<string, { status: Status; reason: string }> = {};
+  /** Coordination agreements between sectors (ai-updates.md 4): active + last 10 expired/cancelled. */
+  @Persisted @Emittable agreements: Agreement[] = [];
+  /** CIC directives to sectors: active + last 10 expired. */
+  @Persisted @Emittable directives: Directive[] = [];
+  /** Last 20 issued clearances (for the parser's context and the UI). */
+  @Persisted @Emittable clearanceLog: ClearanceLogEntry[] = [];
 
   async snapshot(): Promise<{
     airport: Airport | null;
@@ -67,6 +80,9 @@ export class Airspace extends Actor {
     alerts: AlertItem[];
     session: number;
     statuses: Record<string, { status: Status; reason: string }>;
+    agreements: Agreement[];
+    directives: Directive[];
+    clearanceLog: ClearanceLogEntry[];
   }> {
     return {
       airport: this.airport,
@@ -77,6 +93,9 @@ export class Airspace extends Actor {
       alerts: this.alerts,
       session: this.session,
       statuses: this.statuses,
+      agreements: this.agreements,
+      directives: this.directives,
+      clearanceLog: this.clearanceLog,
     };
   }
 
@@ -98,6 +117,9 @@ export class Airspace extends Actor {
       this.conflicts = [];
       this.alerts = [];
       this.statuses = {};
+      this.agreements = [];
+      this.directives = [];
+      this.clearanceLog = [];
       this.session = this.session + 1;
       this.feed = [
         ...this.feed,
@@ -251,8 +273,75 @@ export class Airspace extends Actor {
     return { ok: true };
   }
 
+  // ---- agreements, directives, clearance log (ai-updates.md 4) ----
+
+  async addAgreement(input: Omit<Agreement, "id" | "createdAt" | "expiresAt" | "state"> & { expiresInSec?: number }): Promise<{ ok: true; agreement: Agreement }> {
+    const now = Date.now();
+    const { expiresInSec, ...rest } = input;
+    const agreement: Agreement = {
+      ...rest,
+      id: `AG-${rest.callsign}-${now.toString(36).slice(-5)}`,
+      createdAt: now,
+      expiresAt: now + Math.max(30, expiresInSec ?? AGREEMENT_DEFAULT_SEC) * 1000,
+      state: "active",
+    };
+    // A new agreement for the same aircraft and dimension replaces the old one.
+    const replaced = this.agreements.map((a) =>
+      a.state === "active" && a.hex === agreement.hex && a.constraint.kind === agreement.constraint.kind ? { ...a, state: "cancelled" as const } : a,
+    );
+    this.agreements = trimExpired([...replaced, agreement]);
+    armAirspaceAlarm(this);
+    return { ok: true, agreement };
+  }
+
+  async expireAgreement(id: string, reason?: string): Promise<{ ok: true } | Fail> {
+    const a = this.agreements.find((x) => x.id === id);
+    if (!a) return fail(`No agreement ${id}.`);
+    if (a.state === "active") {
+      this.agreements = trimExpired(this.agreements.map((x) => (x.id === id ? { ...x, state: reason ? ("cancelled" as const) : ("expired" as const) } : x)));
+      armAirspaceAlarm(this);
+    }
+    return { ok: true };
+  }
+
+  async addDirective(input: Omit<Directive, "id" | "createdAt" | "expiresAt" | "state"> & { expiresInSec?: number }): Promise<{ ok: true; directive: Directive }> {
+    const now = Date.now();
+    const { expiresInSec, ...rest } = input;
+    const directive: Directive = {
+      ...rest,
+      id: `DIR-${rest.target}-${now.toString(36).slice(-5)}`,
+      createdAt: now,
+      expiresAt: now + Math.max(30, expiresInSec ?? DIRECTIVE_DEFAULT_SEC) * 1000,
+      state: "active",
+    };
+    this.directives = trimExpired([...this.directives, directive]);
+    armAirspaceAlarm(this);
+    return { ok: true, directive };
+  }
+
+  async expireDirective(id: string): Promise<{ ok: true } | Fail> {
+    const d = this.directives.find((x) => x.id === id);
+    if (!d) return fail(`No directive ${id}.`);
+    if (d.state === "active") {
+      this.directives = trimExpired(this.directives.map((x) => (x.id === id ? { ...x, state: "expired" as const } : x)));
+      armAirspaceAlarm(this);
+    }
+    return { ok: true };
+  }
+
+  async logClearance(entry: Omit<ClearanceLogEntry, "ts">): Promise<{ ok: true }> {
+    this.clearanceLog = [...this.clearanceLog, { ...entry, ts: Date.now() }].slice(-CLEARANCE_LOG_MAX);
+    return { ok: true };
+  }
+
   async onAlarm(): Promise<void> {
     const now = Date.now();
+    if (this.agreements.some((a) => a.state === "active" && a.expiresAt <= now)) {
+      this.agreements = trimExpired(this.agreements.map((a) => (a.state === "active" && a.expiresAt <= now ? { ...a, state: "expired" as const } : a)));
+    }
+    if (this.directives.some((d) => d.state === "active" && d.expiresAt <= now)) {
+      this.directives = trimExpired(this.directives.map((d) => (d.state === "active" && d.expiresAt <= now ? { ...d, state: "expired" as const } : d)));
+    }
     const overdue = this.handoffs.filter((h) => h.state === "pending" && h.dueAt <= now);
     if (overdue.length) {
       this.handoffs = this.handoffs.map((h) => (overdue.includes(h) ? { ...h, state: "overdue" } : h));
@@ -331,11 +420,19 @@ export class Aircraft extends Actor {
 
 function armAirspaceAlarm(a: Airspace): void {
   const dues = [
+    ...a.agreements.filter((x) => x.state === "active").map((x) => x.expiresAt),
+    ...a.directives.filter((x) => x.state === "active").map((x) => x.expiresAt),
     ...a.handoffs.filter((h) => h.state === "pending").map((h) => h.dueAt),
     ...a.conflicts.filter((c) => c.state === "active" || c.state === "coordinating").map((c) => c.dueAt),
   ];
   if (dues.length) a.alarm.set(Math.min(...dues));
   else a.alarm.delete();
+}
+
+function trimExpired<T extends { state: string; createdAt: number }>(list: T[]): T[] {
+  const active = list.filter((x) => x.state === "active");
+  const done = list.filter((x) => x.state !== "active").slice(-EXPIRED_KEEP);
+  return [...active, ...done].sort((x, y) => x.createdAt - y.createdAt);
 }
 
 function trimConflicts(list: ConflictAlert[]): ConflictAlert[] {

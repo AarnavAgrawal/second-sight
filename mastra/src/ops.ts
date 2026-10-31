@@ -51,5 +51,14 @@ export async function issueClearance(input: { callsign: string; req: ClearanceRe
   };
   const r = await aircraft(t.hex).issueClearance({ clearance, callsign: t.callsign, declinationDeg: v.airport.declinationDeg, position: pos });
   await airspace().setStatus(t.hex, r.status, r.reason);
+  await airspace().logClearance({
+    hex: t.hex,
+    callsign: t.callsign,
+    kind: input.req.kind,
+    value: input.req.value,
+    ...(input.req.turn ? { turn: input.req.turn } : {}),
+    phraseology,
+    issuedBy: clearance.issuedBy,
+  });
   return { ok: true, hex: t.hex, callsign: t.callsign, phraseology, status: r.status, reason: r.reason, probe, override };
 }

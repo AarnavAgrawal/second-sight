@@ -67,6 +67,12 @@ interface $AirspaceContract {
                 reason: string
             }
         >
+        /** Coordination agreements between sectors (ai-updates.md 4): active + last 10 expired/cancelled. */
+        agreements: Agreement[]
+        /** CIC directives to sectors: active + last 10 expired. */
+        directives: Directive[]
+        /** Last 20 issued clearances (for the parser's context and the UI). */
+        clearanceLog: ClearanceLogEntry[]
     }
     Methods: {
         /** Atomically transfers track control to `by` and marks the handoff accepted. */
@@ -80,8 +86,24 @@ interface $AirspaceContract {
               }
             | Fail
         >
+        addAgreement(
+            input: Omit<Agreement, "id" | "createdAt" | "expiresAt" | "state"> & {
+                expiresInSec?: number
+            }
+        ): Promise<{
+            ok: true
+            agreement: Agreement
+        }>
         addAlert(alert: AlertItem): Promise<{
             ok: true
+        }>
+        addDirective(
+            input: Omit<Directive, "id" | "createdAt" | "expiresAt" | "state"> & {
+                expiresInSec?: number
+            }
+        ): Promise<{
+            ok: true
+            directive: Directive
         }>
         appendFeed(item: FeedItem): Promise<{
             ok: true
@@ -97,6 +119,21 @@ interface $AirspaceContract {
             ok: true
             session: number
         }>
+        expireAgreement(
+            id: string,
+            reason?: string
+        ): Promise<
+            | {
+                  ok: true
+              }
+            | Fail
+        >
+        expireDirective(id: string): Promise<
+            | {
+                  ok: true
+              }
+            | Fail
+        >
         getAirport(): Promise<{
             airport: Airport | null
             session: number
@@ -113,6 +150,9 @@ interface $AirspaceContract {
               }
             | Fail
         >
+        logClearance(entry: Omit<ClearanceLogEntry, "ts">): Promise<{
+            ok: true
+        }>
         raiseConflict(input: RaiseConflictInput): Promise<{
             ok: true
             conflict: ConflictAlert
@@ -151,6 +191,9 @@ interface $AirspaceContract {
                     reason: string
                 }
             >
+            agreements: Agreement[]
+            directives: Directive[]
+            clearanceLog: ClearanceLogEntry[]
         }>
         updateConflict(
             id: string,
@@ -176,6 +219,24 @@ interface $AirspaceContract {
         }>
     }
 }
+interface Agreement {
+    id: string
+    hex: string
+    callsign: string
+    constraint: AgreementConstraint
+    between: Sector[]
+    source: "APREQ" | "handoff" | "CIC"
+    /** e.g. "DAL456 maintain 6,000 until clear of JBU811 (APREQ)" */
+    text: string
+    createdAt: number
+    expiresAt: number
+    state: "active" | "expired" | "cancelled"
+}
+interface AgreementConstraint {
+    kind: ClearanceKind
+    op: "maintain" | "at_or_below" | "at_or_above"
+    value: number
+}
 interface Airport {
     icao: string
     name: string
@@ -200,6 +261,16 @@ interface Clearance extends ClearanceRequest {
     issuedBy: string
     phraseology: string
 }
+interface ClearanceLogEntry {
+    ts: number
+    hex: string
+    callsign: string
+    kind: ClearanceKind
+    value: number
+    turn?: Turn
+    phraseology: string
+    issuedBy: string
+}
 interface ClearanceRequest {
     kind: ClearanceKind
     value: number
@@ -219,6 +290,19 @@ interface ConflictAlert {
     resolution?: string
     raisedAt: number
     dueAt: number
+}
+interface Directive {
+    id: string
+    target: Sector | "ALL"
+    /** The CIC's words. */
+    text: string
+    rule?: {
+        type: "no_handoffs" | "altitude_cap" | "altitude_floor" | "other"
+        value?: number
+    }
+    createdAt: number
+    expiresAt: number
+    state: "active" | "expired"
 }
 interface FeedItem {
     ts: number

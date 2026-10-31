@@ -12,3 +12,7 @@ export * from "./phraseology.ts";
 export * from "./adsb.ts";
 export * from "./airports.ts";
 export * from "./magvar.ts";
+export * from "./sectorEntry.ts";
+export * from "./phase.ts";
+export * from "./agreements.ts";
+export * from "./candidates.ts";

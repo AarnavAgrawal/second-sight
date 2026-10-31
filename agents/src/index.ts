@@ -1,16 +1,29 @@
 // Agent runner: one process per identity (bun run agent NORTH | SOUTH | MONITOR).
 // Connects a Mastra agent to Agent Relay. Routing (which events need a turn) is deterministic code;
-// each turn gets the event, its structured payload, probe-checked options, and related recent messages.
+// each turn gets the event, its structured payload, math-generated candidates (picked by id), and the
+// agreements and CIC directives stored in the Airspace actor. Protocol: docs/ai-protocol.md.
 import { createMonitorAgent, createSectorAgent } from "../../mastra/src/agents/controllers.ts";
-import { probeFor } from "../../mastra/src/ops.ts";
+import { issueClearance, probeFor } from "../../mastra/src/ops.ts";
+import {
+  candidatesFor,
+  candidateLine,
+  phaseOf,
+  pointOutPrecheck,
+  putCandidate,
+  seedCandidates,
+  type CandidateMap,
+  type CandidateRef,
+} from "../../mastra/src/tools/facts.ts";
+import { allowedDecisions } from "../../mastra/src/tools/review.ts";
 import { turn, type Identity, type TurnContext } from "../../mastra/src/tools/index.ts";
-import { getView } from "../../mastra/src/view.ts";
+import { findAircraft, getView, liveAgreements, liveDirectives, type AirspaceView } from "../../mastra/src/view.ts";
 import { aircraft, airspace } from "../../shared/adapters/actors.ts";
 import { Relay, type RelayMessage } from "../../shared/adapters/relay.ts";
-import { handoffPhrase, unablePhrase } from "../../shared/phraseology.ts";
 import { formatAltitude } from "../../shared/conformance.ts";
-import { spokenCallsign } from "../../shared/telephony.ts";
-import type { ClearanceRequest, ProbeResult, Sector } from "../../shared/types.ts";
+import { distToBoundaryNm } from "../../shared/geo.ts";
+import { apreqPhrase, clearanceBody, handoffPhrase, spokenAltitude, spokenHeading, unablePhrase } from "../../shared/phraseology.ts";
+import { numberWords, spokenCallsign } from "../../shared/telephony.ts";
+import type { Candidate, ClearanceRequest, ProbeResult, ReviewFacts, Sector, SectorEntry, TrafficEntry } from "../../shared/types.ts";
 
 const me = (process.argv[2] || "").toUpperCase() as Identity;
 if (!["NORTH", "SOUTH", "MONITOR"].includes(me)) {
@@ -19,7 +32,10 @@ if (!["NORTH", "SOUTH", "MONITOR"].includes(me)) {
 }
 const other: Sector | null = me === "NORTH" ? "SOUTH" : me === "SOUTH" ? "NORTH" : null;
 const MAX_STEPS = 5; // 4 tool rounds + final answer
+const REVIEW_STEPS = 4; // submit_review, a possible corrected retry, final answer
 const STALE_MS = 60_000;
+/** The workflow waits ~8 s for a REVIEW and ~8 s for a point out reply; past this a turn is pointless. */
+const REVIEW_MAX_AGE_MS = 15_000;
 
 const relay = await Relay.connect(me, {
   type: "agent",
@@ -38,12 +54,19 @@ interface Job {
   task: string;
   conflictId?: string;
   requestId?: string;
+  maxSteps?: number;
+  maxAgeMs?: number;
+  /** Seed the turn context (known candidates, review facts, point out). */
+  setup?: (ctx: TurnContext) => void;
+  /** Runs after the turn (guaranteed replies). */
+  after?: (ctx: TurnContext, text: string) => Promise<void>;
 }
 const queue: Job[] = [];
 const seen = new Map<string, number>();
 const history: RelayMessage[] = [];
-const directions: { ts: number; text: string }[] = [];
 const apreqRounds = new Map<string, number>();
+/** MONITOR: NONCONF timestamps per hex this session. */
+const nonconfHistory = new Map<string, number[]>();
 
 type Data = Record<string, any>;
 const dataOf = (m: RelayMessage): Data => (m.data ?? {}) as Data;
@@ -59,6 +82,13 @@ const remember = (m: RelayMessage) => {
   history.push(m);
   if (history.length > 60) history.shift();
 };
+const reqOf = (c: Candidate): ClearanceRequest => ({ kind: c.kind, value: c.value, ...(c.turn ? { turn: c.turn } : {}) });
+/** "7,800 ft" / "FL230" / "altitude unknown" */
+const altText = (ft: number | null) => (ft == null ? "altitude unknown" : ft >= 17950 ? formatAltitude(ft) : `${formatAltitude(ft)} ft`);
+/** "to eight thousand" / "left heading two seven zero" (as in "Unable, <callsign> <what>"). */
+const whatText = (r: ClearanceRequest) =>
+  r.kind === "altitude" ? `to ${spokenAltitude(r.value)}` : `${r.turn ? `${r.turn} ` : ""}heading ${spokenHeading(r.value)}`;
+const reqText = (cs: string, r: ClearanceRequest, altFt: number | null) => `${sp(cs)}, ${clearanceBody(r, altFt)}`;
 
 function relatedMessages(terms: string[], exceptId: string): string {
   const t = terms.filter(Boolean).map((x) => x.toUpperCase());
@@ -66,40 +96,25 @@ function relatedMessages(terms: string[], exceptId: string): string {
   return rel.length ? rel.map((m) => `- ${m.from} -> ${m.to}: ${m.text}`).join("\n") : "(none)";
 }
 
-function standingDirections(): string {
+/** Active CIC directives for this sector, from the Airspace actor (not process memory). */
+function directivesText(view: AirspaceView): string {
   const now = Date.now();
-  const live = directions.filter((d) => now - d.ts < 10 * 60_000);
-  return live.length ? live.map((d) => `- [${Math.round((now - d.ts) / 1000)} s ago] ${d.text}`).join("\n") : "(none)";
+  const ds = liveDirectives(view, me === "MONITOR" ? undefined : me, now);
+  return ds.length
+    ? ds.map((d) => `- [${d.target}, ${Math.round((d.expiresAt - now) / 1000)} s left] "${d.text}"${d.rule ? ` (rule ${d.rule.type}${d.rule.value != null ? ` ${d.rule.value}` : ""})` : ""}`).join("\n")
+    : "(none)";
 }
 
-/** Deterministic, probe-checked resolution options for a conflict (rules compute facts; the agent chooses). */
-async function resolutionOptions(callsigns: string[], trafficCs: Record<string, string>): Promise<string> {
-  const view = await getView();
-  const decl = view.airport?.declinationDeg ?? 0;
-  const lines: string[] = [];
-  for (const cs of callsigns) {
-    const t = view.traffic.find((x) => x.callsign === cs);
-    if (!t || t.altFt == null) continue;
-    const cands: ClearanceRequest[] = [];
-    if (t.vertRateFpm > 500) cands.push({ kind: "altitude", value: Math.ceil((t.altFt + 300) / 1000) * 1000 });
-    if (t.vertRateFpm < -500) cands.push({ kind: "altitude", value: Math.floor((t.altFt - 300) / 1000) * 1000 });
-    const mag = (((t.trackTrueDeg - decl) % 360) + 360) % 360;
-    for (const d of [30, -30]) {
-      let h = Math.round((mag + d) / 10) * 10;
-      h = ((h % 360) + 360) % 360 || 360;
-      cands.push({ kind: "heading", value: h, turn: d > 0 ? "right" : "left" });
-    }
-    for (const req of cands) {
-      const r = await probeFor(cs, req, view);
-      if (r.ok && r.probe.ok) {
-        lines.push(
-          `- ${r.phraseology} (probe clean${trafficCs[cs] ? `, for traffic ${sp(trafficCs[cs]!)}` : ""}) -> args {callsign:"${cs}", kind:"${req.kind}", value:${req.value}${req.turn ? `, turn:"${req.turn}"` : ""}}`,
-        );
-      }
-    }
-  }
-  return lines.length ? lines.join("\n") : "(no clean option found by probe)";
+function agreementsText(view: AirspaceView, hexes?: string[]): string {
+  const now = Date.now();
+  const ags = liveAgreements(view, undefined, now).filter((a) => !hexes || hexes.includes(a.hex));
+  return ags.length ? ags.map((a) => `- ${a.text} (${a.source}, ${Math.round((a.expiresAt - now) / 1000)} s left)`).join("\n") : "(none)";
 }
+
+const minutesWords = (ms: number) => {
+  const n = Math.max(1, Math.round(ms / 60_000));
+  return n === 1 ? "one minute" : `${numberWords(n)} minutes`;
+};
 
 // ---------------- routing ----------------
 
@@ -111,80 +126,235 @@ async function route(m: RelayMessage): Promise<void> {
   if (m.from === "RADAR" && d.type === "SESSION") {
     session = d.session ?? session + 1;
     queue.length = 0;
-    directions.length = 0;
     apreqRounds.clear();
+    nonconfHistory.clear();
     console.log(`[${me}] SESSION ${d.airport?.icao ?? ""}: dropped pending work`);
     return;
   }
 
   if (me === "MONITOR") {
     if (m.from === "RADAR" && d.type === "NONCONF" && once(`NONCONF:${d.hex}:${d.clearance?.issuedAt}`)) {
-      enqueue(m, 2, `NONCONF:${d.hex}`, "NONCONF", monitorTask(d));
+      const now = Date.now();
+      const hist = [...(nonconfHistory.get(d.hex) ?? []), now];
+      nonconfHistory.set(d.hex, hist);
+      enqueue(m, 2, `NONCONF:${d.hex}`, "NONCONF", monitorTask(d, hist));
     }
     return;
   }
 
   // ---- sector controllers ----
+  if (m.kind === "dm" && m.from === "CIC" && d.type === "CLEARANCE_REVIEW" && once(`REV:${d.requestId}`)) {
+    return enqueueJob(await reviewJob(m, d));
+  }
   if (m.kind === "dm" && m.from === "CIC" && d.type === "CLEARANCE_REQUEST" && once(`CLR:${d.requestId}`)) {
-    return enqueue(m, 0, `CLR:${d.requestId}`, "CLEARANCE_REQUEST", clearanceTask(d), { requestId: d.requestId });
+    // Pre-review workflow message: deterministic, no LLM turn.
+    return void legacyClearance(d).catch((e) => console.error(`[${me}] legacy clearance failed:`, (e as Error).message));
   }
   if (m.from === "RADAR" && d.type === "BOUNDARY" && d.from === me && once(`BOUNDARY:${d.hex}:${d.from}:${d.attempt ?? 1}:${session}`)) {
     return enqueue(m, 1, `BOUNDARY:${d.hex}`, "BOUNDARY", await boundaryTask(d));
   }
   if (m.from === "RADAR" && d.type === "CA" && once(`CA:${d.id}`)) {
     const [sa, sb] = d.sectors as [Sector, Sector];
-    if (sa !== sb && sa === me) return enqueue(m, 1, `CA:${d.id}`, "CA_CROSS", await apreqInitTask(d), { conflictId: d.id });
-    if (sa === sb && sa === me) return enqueue(m, 2, `CA:${d.id}`, "CA_SAME", await sameSectorTask(d), { conflictId: d.id });
+    if (sa !== sb && sa === me) return enqueueJob(await apreqInitJob(m, d));
+    if (sa === sb && sa === me) return enqueueJob(await sameSectorJob(m, d));
     return;
   }
   if (m.kind === "dm" && m.from === other && once(`DM:${m.id}`)) {
-    if (d.type === "HANDOFF") return enqueue(m, 1, `HO:${m.id}`, "HANDOFF_IN", handoffInTask(m, d));
+    if (d.type === "POINT_OUT") return enqueueJob(await pointOutJob(m, d));
+    if (d.type === "HANDOFF") return enqueue(m, 1, `HO:${m.id}`, "HANDOFF_IN", await handoffInTask(m, d));
     if (d.type === "APREQ" || (d.type === "APREQ_REPLY" && d.approved === false)) {
       const id = d.conflictId as string | undefined;
       const round = id ? (apreqRounds.get(id) ?? 0) + 1 : 1;
       if (id) apreqRounds.set(id, round);
-      return enqueue(m, 1, `AP:${m.id}`, "APREQ_IN", await apreqInTask(m, d, round), { conflictId: id });
+      return enqueueJob(await apreqInJob(m, d, round));
     }
     if (d.type === "APREQ_REPLY" && d.approved === true) {
-      // The approving sector usually posts the plan and resolves the CA itself; only take a turn if it didn't.
+      // The approving sector usually posts the plan, resolves the CA and stores the agreement; only take a turn if it didn't.
       const c = d.conflictId ? (await getView()).conflicts.find((x) => x.id === d.conflictId) : undefined;
       if (c && c.state === "resolved") {
         console.log(`[${me}] APREQ approved for ${c.id}; already resolved by ${m.from}, no turn needed`);
         return;
       }
-      return enqueue(m, 1, `AP:${m.id}`, "APREQ_APPROVED", apreqApprovedTask(m, d), { conflictId: d.conflictId });
+      return enqueueJob(await apreqApprovedJob(m, d));
     }
-    return; // RADAR_CONTACT, UNABLE (handoff), INFO, ACK: no turn needed
+    return; // RADAR_CONTACT, UNABLE (handoff), POINT_OUT_REPLY (workflow reads it), INFO, ACK: no turn needed
   }
   if (m.kind === "dm" && m.from === "MONITOR" && d.type === "NONCONF" && once(`NC:${m.id}`)) {
     return enqueue(m, 2, `NC:${m.id}`, "NONCONF_DM", nonconfDmTask(m, d));
   }
   if (m.from === "CIC" && m.to === "#cic" && d.type !== "OVERRIDE" && once(`CIC:${m.id}`)) {
-    directions.push({ ts: Date.now(), text: m.text });
-    return enqueue(m, 1, `CIC:${m.id}`, "CIC", cicTask(m));
+    const job = await cicJob(m);
+    if (job) enqueueJob(job);
+    return;
   }
 }
 
-function enqueue(m: RelayMessage, priority: number, key: string, type: string, task: string, extra: { conflictId?: string; requestId?: string } = {}) {
-  queue.push({ key, msg: m, type, priority, enqueuedAt: Date.now(), task, ...extra });
+function enqueue(m: RelayMessage, priority: number, key: string, type: string, task: string, extra: Partial<Job> = {}) {
+  enqueueJob({ key, msg: m, type, priority, enqueuedAt: Date.now(), task, ...extra });
+}
+
+function enqueueJob(job: Job) {
+  queue.push(job);
   queue.sort((a, b) => a.priority - b.priority || a.enqueuedAt - b.enqueuedAt);
   void work();
 }
 
-// ---------------- task prompts ----------------
+const job = (m: RelayMessage, priority: number, key: string, type: string, task: string, extra: Partial<Job> = {}): Job => ({
+  key,
+  msg: m,
+  type,
+  priority,
+  enqueuedAt: Date.now(),
+  task,
+  ...extra,
+});
 
-function clearanceTask(d: Data): string {
-  const probe = d.probe as ProbeResult;
-  const req = d.clearance as ClearanceRequest;
-  const unable = probe.ok ? "" : unablePhrase(d.callsign, req, probe);
-  return probe.ok
-    ? `The CIC requests a clearance for ${d.callsign} (${sp(d.callsign)}), an aircraft under your track control: "${d.phraseology}". The deterministic probe PASSED.
-Task: call issue_clearance with {callsign:"${d.callsign}", kind:"${req.kind}", value:${req.value}${req.turn ? `, turn:"${req.turn}"` : ""}}. Then give your final answer: the clearance in standard phraseology (exactly "${d.phraseology}" if issued), or, if the tool refused, "Unable, ..." with the tool's reason.
-Do not call send_dm or post; your final answer is delivered to the CIC for you.`
-    : `The CIC requests a clearance for ${d.callsign} (${sp(d.callsign)}): "${d.phraseology}". The deterministic probe FAILED: ${probe.reasons.join(" ")}${d.alternativeText ? ` Probe-checked alternative: "${d.alternativeText}".` : " No clean alternative was found."}
-Task: do NOT issue it. Your final answer is the Unable reply in standard phraseology, for example: "${unable}"
-Do not call any tools; your final answer is delivered to the CIC for you.`;
+// ---------------- clearance review (CIC request) ----------------
+
+function reviewFactsText(d: Data, facts: ReviewFacts, view: AirspaceView): string {
+  const cs = d.callsign as string;
+  const now = Date.now();
+  const probe = facts.probe;
+  const recent = facts.recentConflict;
+  const entry = facts.sectorEntry;
+  const lines = [
+    `- Estimated phase: ${facts.phase}`,
+    `- Probe of the request: ${probe.ok ? "PASSED (no loss of separation in 120 s, valid values)" : `FAILED: ${probe.reasons.join(" ")}`}`,
+    `- Broken agreements: ${facts.brokenAgreements.length ? facts.brokenAgreements.map((a) => `"${a.text}" (${a.source}, ${Math.round((a.expiresAt - now) / 1000)} s left)`).join("; ") : "none"}`,
+    `- Recent conflicting clearance: ${recent ? `"${recent.clearance.phraseology}" issued ${Math.round(recent.secondsAgo)} s ago by ${recent.clearance.issuedBy}; ${recent.why}` : "none"}`,
+    `- Sector entry: ${entry.entersOther ? `enters ${entry.sector ?? other} in about ${entry.inSec != null ? Math.round(entry.inSec) : "?"} s` : "stays in your sector for 120 s"}`,
+    `- Active CIC directives for you: ${facts.directives.length ? facts.directives.map((x) => `"${x.text}"${x.rule ? ` (rule ${x.rule.type}${x.rule.value != null ? ` ${x.rule.value}` : ""})` : ""}`).join("; ") : "none"}`,
+    `- CIC confirmed this request: ${facts.confirmed ? "YES (recent clearance acknowledged; broken agreements are cancelled by the CIC)" : "no"}`,
+  ];
+  const t = findAircraft(view, cs);
+  if (t && view.airport) {
+    lines.push(`- Aircraft now: ${altText(t.altFt)}, ${Math.round(t.vertRateFpm)} fpm, ${Math.round(distToBoundaryNm(t.lat, view.airport) * 10) / 10} NM from the sector line`);
+  }
+  return lines.join("\n");
 }
+
+/** Suggested point out text built from math facts (numbers never come from the model). */
+function pointOutText(cs: string, req: ClearanceRequest, entry: SectorEntry, view: AirspaceView): string {
+  const t = findAircraft(view, cs);
+  const parts = [`Point out, ${sp(cs)}`];
+  if (t && view.airport) {
+    const nm = Math.round(distToBoundaryNm(t.lat, view.airport));
+    const side = t.lat >= view.airport.lat ? "north" : "south";
+    parts.push(nm < 1 ? `less than one mile ${side} of the line` : `${nm === 1 ? "one mile" : `${numberWords(nm)} miles`} ${side} of the line`);
+    if (t.altFt != null) parts.push(spokenAltitude(t.altFt));
+  }
+  parts.push(clearanceBody(req, t?.altFt ?? null));
+  if (entry.inSec != null) parts.push(`will enter your airspace in about ${numberWords(Math.max(10, Math.round(entry.inSec / 10) * 10))} seconds`);
+  return `${parts.join(", ")}.`;
+}
+
+async function reviewJob(m: RelayMessage, d: Data): Promise<Job> {
+  const facts = d.facts as ReviewFacts;
+  const cs = d.callsign as string;
+  const req = d.request as ClearanceRequest;
+  const view = await getView();
+  const allowed = allowedDecisions(facts);
+  const recent = facts.recentConflict;
+  const candLines = facts.candidates.length ? facts.candidates.map((c) => candidateLine(c.id, c)).join("\n") : "(none: no safe alternative found)";
+  const task = `CLEARANCE REVIEW ${d.requestId}. The CIC requests: "${d.requestedPhraseology}" for ${cs} (${sp(cs)}), under your track control.
+Facts (computed by math; never compute or invent numbers):
+${reviewFactsText(d, facts, view)}
+Candidates (each already passes the probe; pick only by id):
+${candLines}
+Allowed decisions for these facts: ${allowed.join(", ")}.
+
+Decision guide:
+- issue: safe, breaks no agreement, no recent contradiction, stays in your sector. phraseology exactly "${d.requestedPhraseology}".
+- unable: unsafe, breaks an agreement, or a CIC directive forbids it. Pick the BEST candidate, preferences in order: (1) no breaks_agreement tag; (2) no enters_other_sector_120s unless nothing else; (3) departure: prefer keeps_climb, avoid stopping a departure's climb low; (4) arrival: prefer altitude changes over large turns, and toward_airport; (5) overflight: smallest deviation; (6) avoid large_deviation when a smaller safe option exists. phraseology like "Unable, ${sp(cs)} ${whatText(req)}, <the deciding fact>. Suggest <the chosen candidate's clearance>."
+- coordinate: safe but enters the other sector. coordinationMessage exactly: "${pointOutText(cs, req, facts.sectorEntry, view)}" phraseology: "${sp(cs)}, pointing out to ${other}, stand by."
+- confirm: a recent conflicting clearance, or an agreement the CIC may not know about. question like ${recent ? `"Confirm, ${sp(cs)} was cleared ${whatText(recent.clearance)} ${Math.round(recent.secondsAgo)} seconds ago?"` : `"Confirm, ${sp(cs)} is restricted by coordination with ${other}: <agreement>. Cancel the restriction?"`} phraseology = the question.
+- reason: one or two sentences naming the deciding facts, e.g. "Keeps the departure climbing and stays out of ${other}'s airspace."
+Task: call submit_review exactly once. If it returns ok:false, fix the problem and call it again. Do not call any other action tools. Then stop.`;
+  return job(m, 0, `REV:${d.requestId}`, "CLEARANCE_REVIEW", task, {
+    requestId: d.requestId,
+    maxSteps: REVIEW_STEPS,
+    maxAgeMs: REVIEW_MAX_AGE_MS,
+    setup: (ctx) => {
+      ctx.reviewFacts = facts;
+      ctx.request = { hex: d.hex, callsign: cs, request: req };
+      for (const c of facts.candidates) ctx.candidates.set(c.id, { ...c, callsign: cs, hex: d.hex });
+    },
+    after: async (ctx) => {
+      const review = ctx.review;
+      const base = { requestId: d.requestId, session, from: me };
+      const r = await relay.dm("CIC", review?.phraseology || "Automatic fallback.", { type: "REVIEW", ...base, review: review ?? null });
+      remember(r);
+      if (review?.decision === "coordinate" && other) {
+        const po = await relay.dm(other, review.coordinationMessage!, { type: "POINT_OUT", ...base, hex: d.hex, callsign: cs, request: req, entry: facts.sectorEntry });
+        remember(po);
+      }
+    },
+  });
+}
+
+/** Old workflow message (CLEARANCE_REQUEST): the probe decides, no LLM. Kept until every workflow sends CLEARANCE_REVIEW. */
+async function legacyClearance(d: Data) {
+  const req = d.clearance as ClearanceRequest;
+  const probe = d.probe as ProbeResult;
+  let issued: { phraseology: string } | null = null;
+  if (probe?.ok) {
+    const r = await issueClearance({ callsign: d.callsign, req, issuedBy: me });
+    if (r.ok) issued = { phraseology: r.phraseology };
+  }
+  const text = issued ? issued.phraseology : unablePhrase(d.callsign, req, probe);
+  await relay.post("cic", text, { type: "CLEARANCE_REPLY", from: me, session, requestId: d.requestId, issued: !!issued, phraseology: issued?.phraseology ?? null, callsign: d.callsign });
+}
+
+// ---------------- point out (receiving side) ----------------
+
+async function pointOutJob(m: RelayMessage, d: Data): Promise<Job> {
+  const view = await getView();
+  const cs = (d.callsign as string) || "";
+  const req = (d.request as ClearanceRequest | undefined) ?? null;
+  const entry = (d.entry as SectorEntry | undefined) ?? { entersOther: true };
+  const pre = pointOutPrecheck(view, me as Sector, d.hex, req);
+  const trafficLines = pre.traffic.length
+    ? pre.traffic.map((t) => `- ${t.callsign} (${sp(t.callsign)}): ${t.minLatNm} NM / ${t.minVertFt} ft, first loss in ${t.inSec} s`).join("\n")
+    : "(none)";
+  const deterministicReason = pre.traffic[0]
+    ? `traffic ${sp(pre.traffic[0].callsign)}, ${pre.traffic[0].minLatNm} miles, ${pre.traffic[0].minVertFt} feet`
+    : pre.blocking[0] ?? "";
+  const task = `${m.from} points out ${cs} (${sp(cs)}): "${m.text}"
+Requested clearance: ${req ? reqText(cs, req, findAircraft(view, cs)?.altFt ?? null) : "(not given)"}; enters your airspace in about ${entry.inSec != null ? Math.round(entry.inSec) : "?"} s.
+Pre-check (math): your aircraft within 3 NM and 1,000 ft of its cleared path in the next 120 s:
+${trafficLines}
+CIC directives that forbid it: ${pre.blocking.length ? pre.blocking.join("; ") : "none"}
+Active CIC directives for you: ${pre.directives.length ? pre.directives.join("; ") : "none"}
+Task: call reply_point_out exactly once. Approve unless the pre-check lists traffic or a forbidding directive. If unable, the reason names the traffic in words (e.g. "${deterministicReason || "traffic Delta four fifty-six, 1.2 miles, 400 feet"}") or the directive. Then stop.`;
+  return job(m, 0, `PO:${m.id}`, "POINT_OUT", task, {
+    requestId: d.requestId,
+    maxSteps: 3,
+    maxAgeMs: REVIEW_MAX_AGE_MS,
+    setup: (ctx) => {
+      ctx.requestId = d.requestId;
+      ctx.pointOut = { requestId: d.requestId, from: m.from as Sector, callsign: cs, replied: false };
+    },
+    after: async (ctx) => {
+      if (ctx.pointOut?.replied) return;
+      // The agent never answered: reply deterministically from the pre-check so the workflow never waits.
+      const approved = pre.clear;
+      const text = approved ? "Point out approved." : `Unable, ${deterministicReason}.`;
+      const r = await relay.dm(m.from, text, {
+        type: "POINT_OUT_REPLY",
+        requestId: d.requestId,
+        session,
+        from: me,
+        callsign: cs,
+        approved,
+        ...(approved ? {} : { reason: deterministicReason }),
+        fallback: true,
+      });
+      remember(r);
+    },
+  });
+}
+
+// ---------------- handoffs ----------------
 
 async function boundaryTask(d: Data): Promise<string> {
   let target: number | null = null;
@@ -199,65 +369,195 @@ async function boundaryTask(d: Data): Promise<string> {
 Task: call initiate_handoff for ${d.callsign}. If it succeeds, send_dm to ${d.to} with kind "HANDOFF", callsign "${d.callsign}", text exactly: "${phrase}". If it fails, stop.`;
 }
 
-function handoffInTask(m: RelayMessage, d: Data): string {
+async function handoffInTask(m: RelayMessage, d: Data): Promise<string> {
   const cs = (d.callsign as string) || "";
+  const s = cs ? sp(cs) : "<spoken callsign>";
+  const view = await getView();
   return `${m.from} DMs you a handoff: "${m.text}" (callsign ${cs || "see text"}).
-Standing CIC directions (follow them if they apply to you):
-${standingDirections()}
-Task: call check_handoff_entry for the aircraft. If clear and no CIC direction says otherwise: accept_handoff, then send_dm to ${m.from} kind "RADAR_CONTACT" text "${cs ? sp(cs) : "<callsign>"}, radar contact." Otherwise: reject_handoff with the reason, then send_dm to ${m.from} kind "UNABLE" with "Unable ${cs ? sp(cs) : ""}, ..." giving the traffic (from the tool) or the CIC direction, and a suggestion.`;
+Active CIC directives for you:
+${directivesText(view)}
+Task: call check_handoff_entry for the aircraft, then exactly one outcome:
+a) directiveBlocks is not empty: reject_handoff citing the directive, then send_dm to ${m.from} kind "UNABLE" text "Unable ${s}, <the CIC directive in a few words>."
+b) traffic near the entry point: if a conditionCandidate fixes it, accept_handoff with conditionCandidateId, then send_dm to ${m.from} kind "RADAR_CONTACT" text "${s}, radar contact, <the condition clearance>." Otherwise reject_handoff with the traffic, then send_dm kind "UNABLE" text "Unable ${s}, traffic <spoken callsign>, <numbers from the tool>. Suggest <a conditionCandidate clearance, if any>."
+c) clear: accept_handoff (no condition), then send_dm to ${m.from} kind "RADAR_CONTACT" text "${s}, radar contact."
+Only attach a condition when traffic or an agreement makes one useful.`;
 }
 
-async function apreqInitTask(d: Data): Promise<string> {
+// ---------------- conflicts (APREQ) ----------------
+
+interface ConflictSide {
+  t: TrafficEntry;
+  owner: Sector | null;
+  phase: string | null;
+  inHandoff: boolean;
+  lines: string[];
+}
+
+/** Candidates for one aircraft in a conflict, seeded into `seed` and rendered with ready APREQ text. */
+function conflictSide(view: AirspaceView, t: TrafficEntry, trafficCs: string, seed: CandidateMap): ConflictSide {
+  const list = candidatesFor(view, t, "resolve_conflict", null, { max: 4 });
+  const lines = seedCandidates(seed, list).map(
+    ({ key, c }) => `${candidateLine(key, c)} -> APREQ text "${apreqPhrase(t.callsign, reqOf(c), trafficCs, t.altFt)}"`,
+  );
+  return {
+    t,
+    owner: view.trackControl[t.hex] ?? null,
+    phase: phaseOf(view, t),
+    inHandoff: view.handoffs.some((h) => h.hex === t.hex && (h.state === "pending" || h.state === "overdue")),
+    lines,
+  };
+}
+
+function sideText(s: ConflictSide): string {
+  return `${s.t.callsign} (${sp(s.t.callsign)}): owner ${s.owner ?? "none"}, estimated phase ${s.phase ?? "unknown"}, ${altText(s.t.altFt)}, ${Math.round(s.t.vertRateFpm)} fpm${s.inHandoff ? ", IN A PENDING HANDOFF (do not move it)" : ""}
+${s.lines.length ? s.lines.join("\n") : "  (no probe-clean candidate)"}`;
+}
+
+function conflictSides(view: AirspaceView, a: string, b: string, hexA: string | undefined, hexB: string | undefined, seed: CandidateMap) {
+  const ta = (hexA && view.traffic.find((x) => x.hex === hexA)) || findAircraft(view, a);
+  const tb = (hexB && view.traffic.find((x) => x.hex === hexB)) || findAircraft(view, b);
+  return [ta ? conflictSide(view, ta, b, seed) : null, tb ? conflictSide(view, tb, a, seed) : null].filter((x): x is ConflictSide => !!x);
+}
+
+const APREQ_PREFS = `Preferences: move the aircraft whose best candidate has the smallest deviation; don't stop a departure's climb (stops_climb) if a heading works; don't move an aircraft in a pending handoff; avoid breaks_agreement and large_deviation tags.`;
+
+async function apreqInitJob(m: RelayMessage, d: Data): Promise<Job> {
   const [ac0, ac1] = d.aircraft as Data[];
-  const opts = await resolutionOptions([d.a, d.b], { [d.a]: d.b, [d.b]: d.a });
-  return `RADAR conflict alert ${d.id}: ${d.a} (${sp(d.a)}, your sector, ${formatAltitude(ac0!.altFt)}, ${ac0!.vertRateFpm} fpm, track ${ac0!.magTrackDeg}) and ${d.b} (${sp(d.b)}, ${other}'s sector, ${formatAltitude(ac1!.altFt)}, ${ac1!.vertRateFpm} fpm, track ${ac1!.magTrackDeg}). Predicted ${d.predictedLatNm} NM / ${d.predictedVertFt} ft in ${d.inSec} s. This is cross-sector; you control ${d.a}, so you start the APREQ.
-Probe-checked resolution options:
-${opts}
-Task: pick ONE option (prefer maneuvering one aircraft, the simplest change). Send an APREQ to ${other}: send_dm to ${other} with kind "APREQ", conflictId "${d.id}", callsign of the aircraft to maneuver, text like "APREQ, <spoken callsign>, <clearance> for traffic <spoken other callsign>." Then update_conflict ${d.id} to "coordinating". If there are no options, update_conflict ${d.id} "escalated" and post to cic: "Unable to resolve CA ${d.a}/${d.b}, CIC action required."`;
+  const view = await getView();
+  const seed: CandidateMap = new Map();
+  const sides = conflictSides(view, d.a, d.b, d.hexA, d.hexB, seed);
+  const task = `RADAR conflict alert ${d.id}: ${d.a} (${sp(d.a)}, your sector, ${formatAltitude(ac0!.altFt)}, ${ac0!.vertRateFpm} fpm, track ${ac0!.magTrackDeg}) and ${d.b} (${sp(d.b)}, ${other}'s sector, ${formatAltitude(ac1!.altFt)}, ${ac1!.vertRateFpm} fpm, track ${ac1!.magTrackDeg}). Predicted ${d.predictedLatNm} NM / ${d.predictedVertFt} ft in ${d.inSec} s. Cross-sector; you control ${d.a}, so you start the APREQ.
+Math-generated resolution candidates (each passes the probe and removes the conflict; pick by id):
+${sides.map(sideText).join("\n")}
+Agreements on these aircraft:
+${agreementsText(view, sides.map((s) => s.t.hex))}
+${APREQ_PREFS}
+Task: pick ONE candidate id. send_dm to ${other} with kind "APREQ", conflictId "${d.id}", candidateId <id>, reason <the deciding facts in one sentence>, text = that candidate's APREQ text. Then update_conflict ${d.id} "coordinating". If there are no candidates at all: update_conflict ${d.id} "escalated" and post to cic "Unable to resolve CA ${d.a}/${d.b}, CIC action required."`;
+  return job(m, 1, `CA:${d.id}`, "CA_CROSS", task, { conflictId: d.id, setup: (ctx) => copyInto(ctx.candidates, seed) });
 }
 
-async function apreqInTask(m: RelayMessage, d: Data, round: number): Promise<string> {
+function copyInto(target: CandidateMap, src: CandidateMap) {
+  for (const [k, v] of src) target.set(k, v);
+}
+
+async function apreqInJob(m: RelayMessage, d: Data, round: number): Promise<Job> {
   const id = d.conflictId as string;
-  const v = await getView();
-  const c = v.conflicts.find((x) => x.id === id);
-  const opts = c ? await resolutionOptions([c.a, c.b], { [c.a]: c.b, [c.b]: c.a }) : "(conflict not found)";
+  const view = await getView();
+  const c = view.conflicts.find((x) => x.id === id);
+  const seed: CandidateMap = new Map();
+  // The other sector's proposal (or counter-proposal) first, so it keeps its own key.
+  let proposedKey: string | undefined;
+  let proposalFact = "(no candidate attached; read the text)";
+  const inc = d.candidate as CandidateRef | undefined;
+  if (inc && inc.callsign && inc.hex) {
+    proposedKey = putCandidate(seed, `${inc.callsign}:${inc.id}`, inc);
+    const pr = await probeFor(inc.callsign, reqOf(inc), view);
+    const t = findAircraft(view, inc.callsign);
+    const pending = t ? view.handoffs.some((h) => h.hex === t.hex && (h.state === "pending" || h.state === "overdue")) : false;
+    proposalFact = `${candidateLine(proposedKey, inc)}
+  Re-probe now: ${pr.ok ? (pr.probe.ok ? "CLEAN" : `FAILS: ${pr.probe.reasons.join(" ")}`) : pr.error}. Owner: ${t ? (view.trackControl[t.hex] ?? "none") : "?"}${t ? `, estimated phase ${phaseOf(view, t)}` : ""}${pending ? ", IN A PENDING HANDOFF" : ""}.${d.reason ? ` Their reason: "${d.reason}"` : ""}`;
+  }
+  const sides = c ? conflictSides(view, c.a, c.b, c.hexA, c.hexB, seed) : [];
   const last = round >= 2;
-  return `${m.from} DMs you (${d.type === "APREQ" ? "APREQ" : "Unable with a counter-proposal"}, round ${round} of 2) about conflict ${id}${c ? ` (${c.a}/${c.b}, state ${c.state})` : ""}: "${m.text}"
+  const pk = proposedKey ?? "<their candidate id>";
+  const task = `${m.from} DMs you (${d.type === "APREQ" ? "APREQ" : "Unable with a counter-proposal"}, round ${round} of 2) about conflict ${id}${c ? ` (${c.a}/${c.b}, state ${c.state})` : ""}: "${m.text}"
+Their proposal:
+${proposalFact}
 Recent coordination:
 ${relatedMessages([id, c?.a ?? "", c?.b ?? ""], m.id)}
-Probe-checked options:
-${opts}
-Task: decide with probe_clearance if needed.
-- If you approve their proposal: send_dm to ${m.from} kind "APREQ_REPLY", approved true, conflictId "${id}", text like "<spoken callsign>, <clearance readback>, approved." Then post to coord the agreed plan (one line, e.g. "Plan for CA ${c?.a ?? ""}/${c?.b ?? ""}: <spoken callsign> <clearance>. Coordinated ${me}/${m.from}.") and update_conflict ${id} "resolved" with that plan as resolution.
-- ${last ? `This is the last round: if you cannot approve, update_conflict ${id} "escalated" and post to cic "CA ${c?.a ?? ""}/${c?.b ?? ""}: no agreement after two rounds. CIC action required."` : `If you cannot approve: send_dm to ${m.from} kind "APREQ_REPLY", approved false, conflictId "${id}", text "Unable, <reason>. Suggest <counter-proposal from the options>."`}`;
+Other math-generated candidates (for a counter-proposal; pick by id):
+${sides.length ? sides.map(sideText).join("\n") : "(conflict not found)"}
+Agreements on these aircraft:
+${agreementsText(view, sides.map((s) => s.t.hex))}
+${APREQ_PREFS}
+Task: approve their proposal if its re-probe is CLEAN and it fits the preferences reasonably; otherwise counter.
+- Approve: send_dm to ${m.from} kind "APREQ_REPLY", approved true, conflictId "${id}", candidateId "${pk}", text "<spoken callsign>, <clearance>, approved." Then post to coord one line "Plan for CA ${c?.a ?? ""}/${c?.b ?? ""}: <spoken callsign> <clearance>. Coordinated ${me}/${m.from}.", update_conflict ${id} "resolved" with that plan as resolution, and add_agreement candidateId "${pk}" source "APREQ" note "for traffic <other callsign>".
+- ${last ? `This is the last round: if you cannot approve, update_conflict ${id} "escalated" and post to cic "CA ${c?.a ?? ""}/${c?.b ?? ""}: no agreement after two rounds. CIC action required."` : `Counter: send_dm to ${m.from} kind "APREQ_REPLY", approved false, conflictId "${id}", candidateId <a DIFFERENT candidate id>, reason <deciding facts>, text "Unable, <reason>. Suggest <that candidate's clearance>."`}`;
+  return job(m, 1, `AP:${m.id}`, "APREQ_IN", task, {
+    conflictId: id,
+    setup: (ctx) => {
+      copyInto(ctx.candidates, seed);
+      if (proposedKey) ctx.proposedKey = proposedKey;
+    },
+  });
 }
 
-function apreqApprovedTask(m: RelayMessage, d: Data): string {
+async function apreqApprovedJob(m: RelayMessage, d: Data): Promise<Job> {
   const id = d.conflictId as string;
-  return `${m.from} approved your APREQ for conflict ${id}: "${m.text}"
-Task: post to coord the agreed plan in one line ("Plan for CA ...: <spoken callsign> <clearance>. Coordinated ${me}/${m.from}.") and update_conflict ${id} "resolved" with that plan as resolution. If the conflict is already resolved, do nothing.`;
+  const view = await getView();
+  const seed: CandidateMap = new Map();
+  const inc = d.candidate as CandidateRef | undefined;
+  let key: string | undefined;
+  if (inc && inc.callsign && inc.hex) key = putCandidate(seed, `${inc.callsign}:${inc.id}`, inc);
+  const stored = inc ? liveAgreements(view).some((a) => a.hex === inc.hex) : false;
+  const task = `${m.from} approved the APREQ for conflict ${id}: "${m.text}"${key ? `\nApproved candidate: ${candidateLine(key, inc!)}` : ""}
+Task: post to coord the agreed plan in one line ("Plan for CA ...: <spoken callsign> <clearance>. Coordinated ${me}/${m.from}.") and update_conflict ${id} "resolved" with that plan as resolution.${key && !stored ? ` Then add_agreement candidateId "${key}" source "APREQ".` : " The agreement is already stored."} If the conflict is already resolved, do nothing.`;
+  return job(m, 1, `AP:${m.id}`, "APREQ_APPROVED", task, {
+    conflictId: id,
+    setup: (ctx) => {
+      copyInto(ctx.candidates, seed);
+      if (key) ctx.proposedKey = key;
+    },
+  });
 }
 
-async function sameSectorTask(d: Data): Promise<string> {
-  const opts = await resolutionOptions([d.a, d.b], { [d.a]: d.b, [d.b]: d.a });
-  return `RADAR conflict alert ${d.id} inside your sector: ${d.a} (${sp(d.a)}) and ${d.b} (${sp(d.b)}), predicted ${d.predictedLatNm} NM / ${d.predictedVertFt} ft in ${d.inSec} s.
-Probe-checked resolution options:
-${opts}
-Task: pick ONE option and post it to coord as an advisory to the CIC (kind "ADVISORY"): "CA ${d.a}/${d.b}: suggest <spoken callsign>, <clearance>, for traffic <spoken other>." Then update_conflict ${d.id} "coordinating". Do not issue the clearance yourself. If there are no options, post the advisory "CA ${d.a}/${d.b}: no clean resolution found, CIC action required." and update_conflict ${d.id} "escalated".`;
+async function sameSectorJob(m: RelayMessage, d: Data): Promise<Job> {
+  const view = await getView();
+  const seed: CandidateMap = new Map();
+  const sides = conflictSides(view, d.a, d.b, d.hexA, d.hexB, seed);
+  const task = `RADAR conflict alert ${d.id} inside your sector: ${d.a} (${sp(d.a)}) and ${d.b} (${sp(d.b)}), predicted ${d.predictedLatNm} NM / ${d.predictedVertFt} ft in ${d.inSec} s.
+Math-generated resolution candidates (pick by id):
+${sides.map(sideText).join("\n")}
+${APREQ_PREFS}
+Task: pick ONE candidate and post it to coord as an advisory to the CIC (kind "ADVISORY"): "CA ${d.a}/${d.b}: suggest <the candidate phraseology> for traffic <spoken other>." Then update_conflict ${d.id} "coordinating". Do not issue the clearance yourself. If there are no candidates, post the advisory "CA ${d.a}/${d.b}: no clean resolution found, CIC action required." and update_conflict ${d.id} "escalated".`;
+  return job(m, 2, `CA:${d.id}`, "CA_SAME", task, { conflictId: d.id, setup: (ctx) => copyInto(ctx.candidates, seed) });
 }
+
+// ---------------- conformance, CIC ----------------
 
 function nonconfDmTask(m: RelayMessage, d: Data): string {
   return `MONITOR reports non-conformance for an aircraft you control: "${m.text}" (callsign ${d.callsign ?? "see text"}).
 Task: post ONE short line to alerts (kind "ADVISORY") with your action, e.g. "${d.callsign ? sp(d.callsign) : "<callsign>"}: non-conformance noted, verifying altitude, traffic advisory to adjacent sector if needed." Use only numbers from the message.`;
 }
 
-function cicTask(m: RelayMessage): string {
-  return `The CIC posted in #cic: "${m.text}"
-Task: if this is a direction to you (${me}) or to all sectors, acknowledge it briefly with post to cic (kind "ACK"), e.g. "${me}, wilco." and follow it from now on (it stays in your standing directions). If it is a question for you, answer briefly from get_sector_picture. If it is not addressed to you, do not call any tools and answer "no action".`;
+/** Who a #cic message addresses, from its words. */
+function addressee(text: string): Sector | "ALL" {
+  const n = /\bnorth\b/i.test(text);
+  const s = /\bsouth\b/i.test(text);
+  if (n && !s) return "NORTH";
+  if (s && !n) return "SOUTH";
+  return "ALL";
 }
 
-function monitorTask(d: Data): string {
-  return `RADAR reports NONCONF: ${JSON.stringify({ callsign: d.callsign, cleared: d.clearedText, clearance: d.clearance, altFt: d.altFt, vertRateFpm: d.vertRateFpm, magTrackDeg: d.magTrackDeg, owner: d.owner, reason: d.reason })}
+async function cicJob(m: RelayMessage): Promise<Job | null> {
+  const addr = addressee(m.text);
+  if (addr !== "ALL" && addr !== me) return null; // addressed to the other sector only
+  const view = await getView();
+  const stores = addr === me || me === "NORTH";
+  const target = addr === "ALL" ? "ALL" : me;
+  const task = `The CIC posted in #cic: "${m.text}" (addressed to ${addr === "ALL" ? "all sectors" : me}).
+Active CIC directives:
+${directivesText(view)}
+Task:
+- If it is a standing direction (e.g. "stop accepting handoffs for two minutes", an altitude cap or floor): ${
+    stores
+      ? `call add_directive with target "${target}", text = the CIC's exact words, rule if it maps (no_handoffs; altitude_cap / altitude_floor with value in feet from the CIC's words; else other), expiresInSec = the duration the CIC said (e.g. two minutes = 120; omit if none). Then post to cic (kind "ACK") one line, e.g. "${me}, wilco, <the direction in a few words>."`
+      : `do NOT call add_directive (NORTH stores all-sector directives). Just post to cic (kind "ACK") one line, e.g. "${me}, wilco."`
+  }
+- If it is a question for you, answer in one line with post to cic, using get_sector_picture.
+- If it needs nothing from you, do not call any tools and answer "no action".`;
+  return job(m, 1, `CIC:${m.id}`, "CIC", task);
+}
+
+const ORDINAL = ["", "First", "Second", "Third", "Fourth", "Fifth"];
+
+function monitorTask(d: Data, hist: number[]): string {
+  const n = hist.length;
+  const repeat =
+    n >= 2
+      ? `\nThis is non-conformance number ${n} for this aircraft this session (first one ${minutesWords(hist[n - 1]! - hist[0]!)} ago). Begin the first sentence with "${ORDINAL[n] ?? `Repeated`} non-conformance for this aircraft in ${minutesWords(hist[n - 1]! - hist[0]!)}."`
+      : "";
+  return `RADAR reports NONCONF: ${JSON.stringify({ callsign: d.callsign, cleared: d.clearedText, clearance: d.clearance, altFt: d.altFt, vertRateFpm: d.vertRateFpm, magTrackDeg: d.magTrackDeg, owner: d.owner, reason: d.reason })}${repeat}
 Task: write exactly two plain-English sentences for the CIC explaining what the aircraft was cleared to do and what it is actually doing, using only these numbers (spoken callsign: ${sp(d.callsign)}). Post them to alerts (kind "NONCONF").${d.owner ? ` Then send_dm the same text to ${d.owner} with kind "NONCONF" and callsign "${d.callsign}".` : ""}`;
 }
 
@@ -272,7 +572,7 @@ async function work() {
       const job = queue.shift()!;
       const d = dataOf(job.msg);
       if (typeof d.session === "number" && d.session < session) continue;
-      if (job.type !== "CLEARANCE_REQUEST" && Date.now() - job.enqueuedAt > STALE_MS) {
+      if (Date.now() - job.enqueuedAt > (job.maxAgeMs ?? STALE_MS)) {
         console.log(`[${me}] dropped stale ${job.key}`);
         continue;
       }
@@ -296,14 +596,17 @@ async function runTurn(job: Job) {
     probes: [],
     sent: [],
     actions: [],
+    candidates: new Map(),
+    review: null,
   };
+  job.setup?.(ctx);
   turn.ctx = ctx;
   const t0 = Date.now();
   const prompt = `Event from ${job.msg.from} to ${job.msg.to}: "${job.msg.text}"
 ${job.task}`;
   let text = "";
   try {
-    const res = await agent.generate(prompt, { maxSteps: job.type === "CLEARANCE_REQUEST" ? 3 : MAX_STEPS });
+    const res = await agent.generate(prompt, { maxSteps: job.maxSteps ?? MAX_STEPS });
     text = (res.text || "").trim();
   } catch (e) {
     console.error(`[${me}] turn ${job.key} failed:`, (e as Error).message);
@@ -318,17 +621,12 @@ ${job.task}`;
       apreqRounds.set(d.conflictId, (apreqRounds.get(d.conflictId) ?? 0) + 1);
     }
   }
-
-  if (job.type === "CLEARANCE_REQUEST") {
-    // Guarantee a reply to the clearance workflow. `issued` comes from the tool, never from the model's words.
-    const d = dataOf(job.msg);
-    const issued = ctx.issued;
-    const reply = issued
-      ? issued.phraseology
-      : text && /unable/i.test(text)
-        ? text
-        : unablePhrase(d.callsign, d.clearance as ClearanceRequest, d.probe as ProbeResult);
-    await relay.post("cic", reply, { type: "CLEARANCE_REPLY", from: me, session, requestId: job.requestId, issued: !!issued, phraseology: issued?.phraseology ?? null, callsign: d.callsign });
+  if (job.after) {
+    try {
+      await job.after(ctx, text);
+    } catch (e) {
+      console.error(`[${me}] after-turn ${job.key} failed:`, (e as Error).message);
+    }
   }
   console.log(`[${me}] ${job.type} ${job.key} (${Date.now() - t0} ms) actions=[${ctx.actions.join("; ")}] sent=${ctx.sent.length} ${text ? `final="${text.slice(0, 140)}"` : ""}`);
 }

@@ -2,7 +2,7 @@
 import { airspace } from "../../shared/adapters/actors.ts";
 import { distToBoundaryNm, trueToMag } from "../../shared/geo.ts";
 import { spokenCallsign } from "../../shared/telephony.ts";
-import type { Airport, ConflictAlert, Handoff, Position, Sector, TrafficEntry } from "../../shared/types.ts";
+import type { Agreement, Airport, ClearanceLogEntry, ConflictAlert, Directive, Handoff, Position, Sector, TrafficEntry } from "../../shared/types.ts";
 
 export interface AirspaceView {
   airport: Airport | null;
@@ -13,6 +13,21 @@ export interface AirspaceView {
   handoffs: Handoff[];
   conflicts: ConflictAlert[];
   statuses: Record<string, { status: string; reason: string }>;
+  /** Active and recently expired agreements (filter with liveAgreements). */
+  agreements: Agreement[];
+  /** Active and recently expired CIC directives (filter with liveDirectives). */
+  directives: Directive[];
+  clearanceLog: ClearanceLogEntry[];
+}
+
+/** Active, unexpired agreements, optionally only those involving `sector`. */
+export function liveAgreements(view: Pick<AirspaceView, "agreements">, sector?: Sector, now = Date.now()): Agreement[] {
+  return view.agreements.filter((a) => a.state === "active" && a.expiresAt > now && (!sector || a.between.includes(sector)));
+}
+
+/** Active, unexpired directives, optionally only those addressed to `sector` (or ALL). */
+export function liveDirectives(view: Pick<AirspaceView, "directives">, sector?: Sector, now = Date.now()): Directive[] {
+  return view.directives.filter((d) => d.state === "active" && d.expiresAt > now && (!sector || d.target === sector || d.target === "ALL"));
 }
 
 export function toPosition(t: TrafficEntry): Position {
@@ -43,6 +58,9 @@ export async function getView(): Promise<AirspaceView> {
     handoffs: s.handoffs,
     conflicts: s.conflicts,
     statuses: s.statuses,
+    agreements: s.agreements ?? [],
+    directives: s.directives ?? [],
+    clearanceLog: s.clearanceLog ?? [],
   };
 }
 
@@ -90,5 +108,20 @@ export function sectorPicture(view: AirspaceView, sector: Sector) {
     activeConflicts: view.conflicts
       .filter((c) => c.state !== "resolved" && c.sectors.includes(sector))
       .map((c) => ({ id: c.id, a: c.a, b: c.b, sectors: c.sectors, predictedLatNm: c.predictedLatNm, predictedVertFt: c.predictedVertFt, inSec: c.inSec, state: c.state, resolution: c.resolution ?? null })),
+    activeAgreements: liveAgreements(view, sector).map((g) => ({
+      id: g.id,
+      callsign: g.callsign,
+      constraint: g.constraint,
+      source: g.source,
+      text: g.text,
+      secondsLeft: Math.round((g.expiresAt - Date.now()) / 1000),
+    })),
+    activeDirectives: liveDirectives(view, sector).map((d) => ({
+      id: d.id,
+      target: d.target,
+      text: d.text,
+      rule: d.rule ?? null,
+      secondsLeft: Math.round((d.expiresAt - Date.now()) / 1000),
+    })),
   };
 }

@@ -224,6 +224,12 @@ const sectorReviewStep = createStep({
       if (!probe.ok) return finish(g, { issued: false, reason: unablePhrase(f.callsign, req, probe), alternative: alternativeOf(f) });
       const r = await issueClearance({ callsign: f.callsign, req, issuedBy: f.sector });
       if (!r.ok) return finish(g, { issued: false, reason: r.error, alternative: alternativeOf(f) });
+      // Show the issued clearance in the feed (in agent mode the sector's own reply does this).
+      if (deps.relay) {
+        await deps.relay
+          .post("cic", r.phraseology, { type: "CLEARANCE", callsign: f.callsign, hex: f.hex, sector: f.sector, clearance: req, probe })
+          .catch((e) => console.error("[clearance] #cic post failed:", (e as Error).message));
+      }
       return finish(log(g, "issue", "ok", r.phraseology, t0), { issued: true, phraseology: r.phraseology });
     }
 

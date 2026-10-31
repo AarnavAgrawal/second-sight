@@ -25,8 +25,8 @@ The real aircraft never hear our clearances. The demo shows conformance against 
 
 - **Terse Durable Actors hold all state.** Each aircraft with an active clearance is an actor with its own memory and its own timer for conformance checks. One `Airspace` actor owns track control (which sector controls which aircraft), handoffs, and conflict alerts. Actors process one call at a time, so an aircraft can never be under two sectors' control or none during a handoff. Real ATC automation enforces exactly this.
 - **Agent Relay carries all coordination.** Each sector controller agent runs as its own process with its own Relay identity. The only way they talk is through Relay channels and DMs, the way real controllers in adjacent sectors coordinate over an interphone line.
-- **Mastra runs the agents and the clearance pipeline.** NORTH, SOUTH, and MONITOR are Mastra agents with typed Mastra tools, running Claude models. The path from a spoken clearance to an issued one (parse, resolve, probe, sector review, issue) is a Mastra workflow, so every step is explicit and visible.
-- **Design rule: rules compute facts, LLMs talk.** Geometry, separation math, conformance, probes, and track control are plain deterministic code. Claude only parses speech into clearances and decides how to phrase and coordinate. This keeps the demo reliable.
+- **Mastra runs the agents and the clearance pipeline.** NORTH, SOUTH, and MONITOR are Mastra agents with typed Mastra tools, running OpenAI models. The path from a spoken clearance to an issued one (parse, resolve, probe, sector review, issue) is a Mastra workflow, so every step is explicit and visible.
+- **Design rule: rules compute facts, LLMs talk.** Geometry, separation math, conformance, probes, and track control are plain deterministic code. The LLM only parses speech into clearances and decides how to phrase and coordinate. This keeps the demo reliable.
 
 ---
 
@@ -107,7 +107,7 @@ These SDKs change fast. Do not trust memory or this file for exact method names.
 - Agent Relay TypeScript SDK: https://agentrelay.com/docs/typescript-sdk (check the version selector and read the latest version)
 - Agent Relay Observer (shows all messages, useful during the demo): https://agentrelay.com/observer
 - Mastra docs (agents, tools, workflows, model router, structured output): https://mastra.ai/docs
-- Anthropic current model names: https://docs.claude.com
+- OpenAI current model names: https://platform.openai.com/docs/models
 - Deepgram speech-to-text (pre-recorded audio API, Nova-3, keyterm prompting): https://developers.deepgram.com
 - ADS-B data (no key needed): `GET https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{nm}`
 - Airport data (public domain, no key): OurAirports `airports.csv` at https://davidmegginson.github.io/ourairports-data/airports.csv. Columns we need: `ident`, `type`, `name`, `latitude_deg`, `longitude_deg`, `elevation_ft`, `iso_country`, `iso_region`, `municipality`, `gps_code`, `iata_code`, `local_code`. Check the header row before parsing.
@@ -118,7 +118,7 @@ These SDKs change fast. Do not trust memory or this file for exact method names.
 
 - TypeScript agent framework. Runs on Bun. Package `@mastra/core`; scaffolding with `npm create mastra@latest` (don't use the scaffold if it fights our layout, just install the package).
 - Agents: `new Agent({ id, name, instructions, model, tools })` from `@mastra/core/agent`. Call with `agent.generate(...)`; there is an option to cap tool-call steps.
-- Models: either the model router string form (`"anthropic/<model-id>"`, reads `ANTHROPIC_API_KEY`) or the AI SDK provider (`anthropic("<model-id>")` from `@ai-sdk/anthropic`). Use whichever the current docs recommend.
+- Models: the model router string form (`"openai/<model-id>"`, reads `OPENAI_API_KEY`). Verified in `mastra/src/models.ts`.
 - Tools: `createTool({ id, description, inputSchema, outputSchema?, execute })` from `@mastra/core/tools`, with Zod schemas.
 - Structured output: `generate` supports returning an object matching a Zod schema. Check the current option name in the docs.
 - Workflows: `createWorkflow` and `createStep` with typed input and output schemas, chained with `.then(...)` and finished with `.commit()`. Check current names in the docs.
@@ -141,7 +141,7 @@ These SDKs change fast. Do not trust memory or this file for exact method names.
 ### What I already know about Agent Relay (verify)
 
 - Package: `@agent-relay/sdk` (`bun add @agent-relay/sdk`).
-- Newer versions can create a hosted workspace and register agents driven by our own code (for example `AgentRelay.createWorkspace(...)` and `register()`). We do **not** need to spawn Claude Code or Codex CLI agents. Our agents are our own Claude tool-use loops.
+- Newer versions can create a hosted workspace and register agents driven by our own code (for example `AgentRelay.createWorkspace(...)` and `register()`). We do **not** need to spawn Claude Code or Codex CLI agents. Our agents are our own Mastra tool-use loops.
 - Messages have roughly `{ from, to, text, threadId?, data? }`. There are DMs, channels, threads, and event listeners.
 - Prebuilt broker binaries are published for Linux and macOS. **Avoid any feature that needs the local broker** (CLI agent spawning). If the hosted workspace path fails on Windows, move the project into WSL2.
 
@@ -153,16 +153,16 @@ These SDKs change fast. Do not trust memory or this file for exact method names.
 - Try native Windows first. If the Terse CLI or Agent Relay SDK fails, switch to WSL2 (Ubuntu) and keep going there. Don't spend more than 10 minutes fighting tooling.
 - Runtime: **Bun** for everything (Terse requires Bun 1.4.2+).
 - Browser: **Microsoft Edge** (Chromium). Microphone access works on `http://localhost`.
-- LLM: **Claude via Mastra.** No direct Anthropic SDK calls. Read the model from env: `ANTHROPIC_MODEL_FAST` for the clearance parser agent (default `claude-haiku-5-5`) and `ANTHROPIC_MODEL_AGENT` for the sector controller and monitor agents (default `claude-sonnet-5-5`). Check https://docs.claude.com for current model names.
+- LLM: **OpenAI via Mastra** (model router `"openai/<id>"`, reads `OPENAI_API_KEY`). No direct OpenAI SDK calls. Read the model from env: `OPENAI_MODEL_FAST` for the clearance parser agent (default `gpt-5.4-mini`) and `OPENAI_MODEL_AGENT` for the sector controller and monitor agents (default `gpt-5.5`).
 - Voice: **Deepgram for both directions** (I have credits). Speech-to-text with **Nova-3** (pre-recorded API, keyterm prompting for callsigns). Text-to-speech with **Aura-2** so the sector controllers talk back. Fallbacks: browser Web Speech API for input, `speechSynthesis` for output.
 - Voice stack decision (don't revisit): we need push-to-talk transcription with custom vocabulary plus short spoken replies, not a phone-style conversational agent. Vapi and Deepgram's Voice Agent API run their own LLM loop and turn-taking, which would bypass our probe and Relay flow. AWS Transcribe needs more setup (IAM, custom vocabulary jobs) for no accuracy gain here. Azure is not set up.
-- **Keep `ANTHROPIC_API_KEY` in the project `.env` only** (Bun loads it for the app). Do not set it in my PowerShell session or Windows user environment. I run Claude Code on my subscription, and a shell-level `ANTHROPIC_API_KEY` would make Claude Code bill the API key instead.
+- **Keep `OPENAI_API_KEY` in the project `.env` only** (Bun loads it for the app). Do not set it in the shell or user environment.
 
 `.env` (never commit):
 ```
-ANTHROPIC_API_KEY=
-ANTHROPIC_MODEL_FAST=claude-haiku-5-5
-ANTHROPIC_MODEL_AGENT=claude-sonnet-5-5
+OPENAI_API_KEY=
+OPENAI_MODEL_FAST=gpt-5.4-mini
+OPENAI_MODEL_AGENT=gpt-5.5
 DEEPGRAM_API_KEY=
 DEEPGRAM_TTS_VOICE=       # any English Aura-2 voice; pick a calm, clear one from the Deepgram docs
 TERSE_ACTOR_URL=          # local: http://127.0.0.1:7100/... (from terse actor dev output)
@@ -418,7 +418,7 @@ Vite + React + TypeScript + Leaflet with a dark basemap (CARTO dark tiles, no ke
 Commit at the end of every phase. After each phase, tell me in three lines what works and how to run it. If a phase runs long, cut from section 16 instead of extending.
 
 **Phase 0: setup (10:00 to 11:00, before hacking starts, no project code)**
-Install Bun and the Terse CLI (`bunx terse-cli@latest install`). Confirm `terse` runs. Install the Agent Relay SDK in a scratch folder and confirm it imports. Have Anthropic and Deepgram keys ready. Download `airports.csv` into `data/` (it's data, not code). Read the docs in section 3.
+Install Bun and the Terse CLI (`bunx terse-cli@latest install`). Confirm `terse` runs. Install the Agent Relay SDK in a scratch folder and confirm it imports. Have OpenAI and Deepgram keys ready. Download `airports.csv` into `data/` (it's data, not code). Read the docs in section 3.
 
 **Phase 1: airport and live scope (11:00 to 11:50)**
 Scaffold the repo. Airport build script + lookup. Types + ADS-B normalizer. `Airspace` actor with `configure`, `updateTraffic`, `airport`, `traffic`. Bridge `/airports/:code`, `/session`, poller, recorder, `/grant`. Start screen + scope with data blocks.
@@ -488,7 +488,7 @@ Never cut: airport picker, live scope with data blocks, altitude clearances, the
 - Read the docs in section 3 before writing SDK code. If the real API differs from this file, follow the docs and update this file.
 - Use the terminology in section 2 in names, UI text, and prompts. If you're unsure of a term, ask me rather than inventing one.
 - Build in phase order. Get each phase running end to end before starting the next.
-- Keep deterministic logic in `shared/` as pure functions with tests. Keep Claude calls out of anything that decides state or safety. Mastra tools and workflow steps call the `shared/` functions; they never reimplement them.
+- Keep deterministic logic in `shared/` as pure functions with tests. Keep LLM calls out of anything that decides state or safety. Mastra tools and workflow steps call the `shared/` functions; they never reimplement them.
 - Never hardcode keys. Never commit `.env`, `data/airports.csv`, or recordings over 20 MB.
 - No fake data in live mode. Simulated aircraft and bent tracks only appear in replay mode, behind the `REPLAY` badge.
 - Prefer boring, working code over clever code. Ask me before any refactor that touches more than two packages.

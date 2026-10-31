@@ -16,7 +16,7 @@ Types referenced below are in [`shared/types.ts`](../shared/types.ts) (CLAUDE.md
 wsl -d Ubuntu -u root -- bash scripts/actor-dev.sh
 # 2. Bridge (ADS-B poller, conflict alert, HTTP API, RADAR on Relay)
 bun run bridge
-# 3. Sector controller agents (need ANTHROPIC_API_KEY in .env)
+# 3. Sector controller agents (need OPENAI_API_KEY in .env)
 bun run agent NORTH
 bun run agent SOUTH
 bun run agent MONITOR
@@ -94,7 +94,7 @@ Response (`ClearanceResult`):
   "probe": { "ok": false, "reasons": ["Traffic BYF21, 2.3 NM, 300 ft, in 10 s."], "conflicts": [ ... ] },
   "parsed": { ... }, "hex": "...", "sector": "NORTH", "steps": [ ... ] }
 
-// Couldn't parse / unknown callsign
+// Couldn't parse / unknown callsign  (HTTP 422, same JSON body; all other outcomes are HTTP 200)
 { "issued": false, "transcript": "...", "reason": "Say again. ...", "sayAgain": true, "suggestions": ["UAL123", "UAL1234"], "steps": [ ... ] }
 
 // Sector agent didn't answer within 8 s
@@ -103,6 +103,7 @@ Response (`ClearanceResult`):
 - **Unable card:** show `reason`, `probe.reasons`; "Issue alternative" = `POST /clearance { text: alternative.text, clearance: alternative }`; "CIC override" = resend the original request with `override: true`.
 - `steps[].id` ∈ `parse | resolve | probe | sectorReview | issue`, `status` ∈ `ok | fail | skipped`.
 - `sector` picks the voice for speaking an Unable reply.
+- Every issued clearance also appears in the feed in `#cic` (from the sector agent, or from `CIC` in direct mode and for overrides).
 
 **Streaming step progress (optional):** send `Accept: text/event-stream` (or `?stream=1`). Server-Sent Events:
 ```

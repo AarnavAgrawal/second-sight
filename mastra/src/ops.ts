@@ -1,5 +1,5 @@
 // Deterministic operations shared by Mastra tools and the clearance workflow.
-// Safety decisions (probe, issue rules) are plain code here; Claude never decides them.
+// Safety decisions (probe, issue rules) are plain code here; the LLM never decides them.
 import { aircraft, airspace } from "../../shared/adapters/actors.ts";
 import { clearanceWindow } from "../../shared/conformance.ts";
 import { clearancePhrase } from "../../shared/phraseology.ts";

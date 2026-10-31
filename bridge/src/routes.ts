@@ -50,7 +50,8 @@ export async function extraRoutes(req: Request, url: URL): Promise<Response | nu
 
     const result = await runClearance(input);
     logResult(result);
-    return j(result);
+    // 422 when the transmission couldn't be parsed or the callsign isn't in radar contact ("Say again").
+    return j(result, result.sayAgain ? 422 : 200);
   }
 
   if (req.method === "POST" && url.pathname === "/transcribe") {

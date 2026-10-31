@@ -125,21 +125,28 @@ class Poller {
     if (gen !== this.gen) return;
     const now = Date.now();
     const positions = dropShadows(normalizeAdsb(snap, airport, now));
-    // Terminal conflict alert is for IFR traffic: leave VFR (squawk 1200) out of CA pairs.
-    const vfr = new Set(snap.ac.filter((a) => String(a.squawk ?? "") === "1200").map((a) => String(a.hex).toLowerCase()));
+    // Terminal conflict alert and handoffs are for tracked IFR traffic (discrete squawk, not VFR 1200).
+    // CA eligibility: a known, non-VFR squawk (drops TIS-B/unknown targets that carry no squawk).
+    const discrete = new Set(snap.ac.filter((a) => a.squawk != null && String(a.squawk) !== "1200").map((a) => String(a.hex).toLowerCase()));
     this.positions = positions;
     this.latest = new Map(positions.map((p) => [p.hex, p]));
     this.lastPollAt = now;
 
     const space = airspace();
-    const upd = await space.updateTraffic(positions);
+    const upd = await space.updateTraffic(positions, this.session);
     if (!upd.ok || upd.session !== this.session || gen !== this.gen) return;
     const tc = upd.trackControl as Record<string, Sector>;
     const snapState = await space.snapshot();
+    if (gen !== this.gen) return;
 
+    // Replay scenarios may focus CA/BOUNDARY on their scripted aircraft (scenario.json "focusCallsigns").
+    const focus = this.source instanceof ReplaySource ? this.source.focusCallsigns : null;
+    const eligible = positions.filter((p) => discrete.has(p.hex));
     await this.conformance(positions, snapState.statuses, tc);
-    await this.conflicts(positions.filter((p) => !vfr.has(p.hex)), tc, snapState.conflicts, airport, now);
-    await this.boundaries(positions.filter((p) => !vfr.has(p.hex)), tc, snapState.handoffs, airport);
+    if (gen !== this.gen) return;
+    await this.conflicts(eligible, tc, snapState.conflicts, airport, now, focus);
+    if (gen !== this.gen) return;
+    await this.boundaries(focus ? eligible.filter((p) => focus.has(p.callsign)) : eligible, tc, snapState.handoffs, airport);
   }
 
   /** Feed positions to Aircraft actors that have an active clearance. */
@@ -193,6 +200,7 @@ class Poller {
     existing: { id: string; hexA: string; hexB: string; state: string }[],
     airport: Airport,
     now: number,
+    focus: Set<string> | null = null,
   ) {
     // Terminal-area rule: pairs where both aircraft are in the approach/departure corridor
     // (within 6 NM of the field and below 3,000 ft AGL) are parallel-runway traffic, not conflicts.
@@ -201,7 +209,12 @@ class Poller {
     const preds = conflictAlert(positions, airport).filter((c) => {
       const a = this.latest.get(c.hexA);
       const b = this.latest.get(c.hexB);
-      return !(a && b && inCorridor(a) && inCorridor(b));
+      if (!a || !b) return false;
+      if (focus && !focus.has(a.callsign) && !focus.has(b.callsign)) return false;
+      if (inCorridor(a) && inCorridor(b)) return false;
+      // Low-level GA: both aircraft below the CA floor (default 2,500 ft AGL) are not alerted.
+      const floor = airport.elevationFt + config.caFloorAglFt;
+      return !((a.altFt ?? 0) < floor && (b.altFt ?? 0) < floor);
     });
     const predicted = new Set(preds.map((p) => pairKey(p.hexA, p.hexB)));
     const open = existing.filter((c) => c.state !== "resolved");

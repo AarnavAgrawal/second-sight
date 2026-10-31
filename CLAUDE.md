@@ -145,13 +145,6 @@ These SDKs change fast. Do not trust memory or this file for exact method names.
 - Messages have roughly `{ from, to, text, threadId?, data? }`. There are DMs, channels, threads, and event listeners.
 - Prebuilt broker binaries are published for Linux and macOS. **Avoid any feature that needs the local broker** (CLI agent spawning). If the hosted workspace path fails on Windows, move the project into WSL2.
 
-### Verified at build time (Oct 31) — these override the notes above
-- **Terse:** SDK/CLI 0.14.9. The local actor runtime has **no Windows build**, so only `terse actor dev` runs in WSL Ubuntu via `scripts/actor-dev.sh` (it rsyncs `actor/` + `shared/` into `/root/second-sight` and serves `127.0.0.1:7100`, reachable from Windows). Everything else runs on Windows. Terse treats **every class method (even private) as an async actor method**, so actor helpers are module-level functions. `state_update` = `{ changes: {field: fullNewValue}, removed: [], version }` (shallow merge). `this.alarm.delete()` exists. The generated client lives in `shared/adapters/generated/` (regenerate with `terse actor generate --out-dir shared/adapters/generated` while the dev server runs).
-- **Agent Relay:** the `@agent-relay/sdk` TS SDK is broker-bound, so we use the hosted **Relaycast REST API** directly in `shared/adapters/relay.ts` (base `https://armadillo.agentrelay.com/v1`; `cast.` is slow/503s). Credentials persist in `.relay-identities.json` (gitignored). Structured `data` round-trips as message `metadata`. The hosted Observer UI only accepts `cast` keys, so the demo shows coordination in the app's Relay feed (or switch `RELAY_BASE_URL` to cast to use the Observer).
-- **Mastra:** `@mastra/core` 1.81, model router strings `anthropic/<id>`, `generate(prompt, { maxSteps, structuredOutput: { schema } })` → `res.object`, tools `execute(inputData, context)`, workflows `createWorkflow().then(step).commit()` and `await wf.createRun()` → `run.start({ inputData })`.
-- **Map tiles:** CARTO dark tiles now watermark without a key; the UI uses Esri World Dark Gray (no key). Override with `VITE_TILE_URL`.
-- **Terminal-area filters (bridge):** TIS-B shadow targets (`~` hex duplicating an ICAO target) are dropped; VFR (squawk 1200) aircraft are excluded from CA pairs and handoffs; CA pairs where both aircraft are within 6 NM of the field and below 3,000 ft AGL (parallel approaches) are ignored.
-
 ---
 
 ## 4. Environment
@@ -203,7 +196,7 @@ second-sight/
 ```
 
 Run commands to document in a short README as we go:
-- `terse actor dev` (in `actor/`) — on Windows: `wsl -d Ubuntu -u root -- bash scripts/actor-dev.sh`
+- `terse actor dev` (in `actor/`)
 - `bun run bridge`
 - `bun run agent NORTH`, `bun run agent SOUTH`, `bun run agent MONITOR` (three terminals)
 - `bun run web`

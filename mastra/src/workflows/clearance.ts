@@ -23,12 +23,23 @@ export function configureClearanceWorkflow(d: { relay: Relay | null }) {
   deps.relay = d.relay;
 }
 
+/** Step progress listeners, keyed by a token passed in the workflow input (for SSE streaming to the UI). */
+export type StepEvent = { id: string; status: "ok" | "fail" | "skipped"; detail: string; ms: number };
+const progress = new Map<string, (e: StepEvent) => void>();
+
 // ---- schemas ----
 const StepId = z.enum(["parse", "resolve", "probe", "sectorReview", "issue"]);
 const StepLog = z.object({ id: StepId, status: z.enum(["ok", "fail", "skipped"]), detail: z.string(), ms: z.number() });
 const Sector = z.enum(["NORTH", "SOUTH"]);
 const Parsed = z.object({ callsign: z.string(), kind: z.enum(["altitude", "heading"]), value: z.number(), turn: z.enum(["left", "right"]).optional() });
-const Alternative = z.object({ kind: z.enum(["altitude", "heading"]), value: z.number(), turn: z.enum(["left", "right"]).optional(), text: z.string() });
+const Alternative = z.object({
+  callsign: z.string(),
+  kind: z.enum(["altitude", "heading"]),
+  value: z.number(),
+  turn: z.enum(["left", "right"]).optional(),
+  /** Standard phraseology; also valid as `text` for POST /clearance. */
+  text: z.string(),
+});
 
 export const ClearanceResultSchema = z.object({
   issued: z.boolean(),
@@ -59,15 +70,24 @@ const Flow = z.object({
   probe: z.any().nullable(),
   steps: z.array(StepLog),
   final: ClearanceResultSchema.nullable(),
+  progressToken: z.string().nullable(),
 });
 type Flow = z.infer<typeof Flow>;
 
-export const ClearanceInputSchema = z.object({ text: z.string(), override: z.boolean().optional(), selectedHex: z.string().nullable().optional() });
-
-const log = (f: Flow, id: z.infer<typeof StepId>, status: "ok" | "fail" | "skipped", detail: string, t0: number): Flow => ({
-  ...f,
-  steps: [...f.steps, { id, status, detail, ms: Date.now() - t0 }],
+export const ClearanceInputSchema = z.object({
+  text: z.string(),
+  override: z.boolean().optional(),
+  selectedHex: z.string().nullable().optional(),
+  /** Optional structured clearance (e.g. the probe's alternative). When present, the parse step skips the LLM. */
+  clearance: Parsed.optional(),
+  progressToken: z.string().optional(),
 });
+
+const log = (f: Flow, id: z.infer<typeof StepId>, status: "ok" | "fail" | "skipped", detail: string, t0: number): Flow => {
+  const entry = { id, status, detail, ms: Date.now() - t0 };
+  if (f.progressToken) progress.get(f.progressToken)?.(entry);
+  return { ...f, steps: [...f.steps, entry] };
+};
 const finish = (f: Flow, extra: Partial<ClearanceResult> & { issued: boolean }): Flow => ({
   ...f,
   final: {
@@ -104,12 +124,18 @@ const parseStep = createStep({
       probe: null,
       steps: [],
       final: null,
+      progressToken: inputData.progressToken ?? null,
     };
     const v = await getView();
     if (!v.airport) return finish(log(f, "parse", "fail", "No active airport.", t0), { issued: false, reason: "No active airport.", sayAgain: true });
     // Selected aircraft first so the parser prefers it on ambiguity.
     const sel = inputData.selectedHex ? v.traffic.filter((t) => t.hex === inputData.selectedHex) : [];
     const cands = [...sel, ...v.traffic.filter((t) => t.hex !== inputData.selectedHex)].map((t) => ({ callsign: t.callsign, spoken: spokenCallsign(t.callsign) }));
+    if (inputData.clearance) {
+      const c = inputData.clearance;
+      f.parsed = { callsign: c.callsign, kind: c.kind, value: c.value, ...(c.turn ? { turn: c.turn } : {}) };
+      return log(f, "parse", "ok", `Structured clearance: ${c.callsign} ${c.kind} ${c.value}${c.turn ? ` ${c.turn}` : ""}`, t0);
+    }
     try {
       const p = await parseClearance(f.text, cands);
       if (!p.callsign || !p.kind || p.value == null) {
@@ -167,7 +193,7 @@ const probeStep = createStep({
 function alternativeOf(f: Flow): z.infer<typeof Alternative> | undefined {
   const alt = (f.probe as ProbeResult | null)?.alternative;
   if (!alt || !f.callsign) return undefined;
-  return { kind: alt.kind, value: alt.value, ...(alt.turn ? { turn: alt.turn } : {}), text: clearancePhrase(f.callsign, alt, f.currentAltFt) };
+  return { callsign: f.callsign, kind: alt.kind, value: alt.value, ...(alt.turn ? { turn: alt.turn } : {}), text: clearancePhrase(f.callsign, alt, f.currentAltFt) };
 }
 
 const sectorReviewStep = createStep({
@@ -252,7 +278,20 @@ export const clearanceWorkflow = createWorkflow({
   .then(resultStep)
   .commit();
 
-export async function runClearance(input: z.infer<typeof ClearanceInputSchema>): Promise<ClearanceResult> {
+export async function runClearance(
+  input: z.infer<typeof ClearanceInputSchema>,
+  onStep?: (e: StepEvent) => void,
+): Promise<ClearanceResult> {
+  const token = onStep ? `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` : undefined;
+  if (token && onStep) progress.set(token, onStep);
+  try {
+    return await runClearanceInner({ ...input, ...(token ? { progressToken: token } : {}) });
+  } finally {
+    if (token) progress.delete(token);
+  }
+}
+
+async function runClearanceInner(input: z.infer<typeof ClearanceInputSchema>): Promise<ClearanceResult> {
   const run = await clearanceWorkflow.createRun();
   const res = await run.start({ inputData: input });
   if (res.status === "success") return res.result as ClearanceResult;

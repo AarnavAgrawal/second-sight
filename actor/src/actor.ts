@@ -109,9 +109,11 @@ export class Airspace extends Actor {
   }
 
   /** Called by the bridge every poll with the full set of aircraft in range. */
-  async updateTraffic(batch: Position[]): Promise<{ ok: boolean; trackControl: Record<string, Sector>; session: number }> {
+  async updateTraffic(batch: Position[], session?: number): Promise<{ ok: boolean; trackControl: Record<string, Sector>; session: number }> {
     const airport = this.airport;
     if (!airport) return { ok: false, trackControl: {}, session: this.session };
+    // A poll that started before an airport change must not write old traffic into the new session.
+    if (session !== undefined && session !== this.session) return { ok: false, trackControl: {}, session: this.session };
 
     const inBatch = new Set(batch.map((p) => p.hex));
     const pendingHandoff = new Set(this.handoffs.filter((h) => h.state === "pending").map((h) => h.hex));

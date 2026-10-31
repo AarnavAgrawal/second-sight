@@ -166,7 +166,10 @@ interface $AirspaceContract {
             | Fail
         >
         /** Called by the bridge every poll with the full set of aircraft in range. */
-        updateTraffic(batch: Position[]): Promise<{
+        updateTraffic(
+            batch: Position[],
+            session?: number
+        ): Promise<{
             ok: boolean
             trackControl: Record<string, Sector>
             session: number

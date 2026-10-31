@@ -28,6 +28,15 @@ const stamp = (d = new Date()) =>
   `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-` +
   `${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}${String(d.getSeconds()).padStart(2, "0")}`;
 
+// Free readsb-compatible ADS-B APIs, tried in order. adsb.lol is primary (CLAUDE.md); adsb.fi is the
+// fallback when adsb.lol rate-limits (HTTP 429). Same per-aircraft fields; adsb.fi names the list "aircraft".
+const PROVIDERS = [
+  { name: "adsb.lol", url: (lat: number, lon: number, nm: number) => `${config.adsbBase}/lat/${lat.toFixed(4)}/lon/${lon.toFixed(4)}/dist/${nm}` },
+  { name: "adsb.fi", url: (lat: number, lon: number, nm: number) => `https://opendata.adsb.fi/api/v2/lat/${lat.toFixed(4)}/lon/${lon.toFixed(4)}/dist/${nm}` },
+];
+const cooldownUntil = new Map<string, number>();
+let activeProvider = "";
+
 export class LiveSource implements Source {
   readonly kind = "live" as const;
   private file: string;
@@ -39,11 +48,32 @@ export class LiveSource implements Source {
   }
   async next(): Promise<Snapshot> {
     const { lat, lon, radiusNm } = this.airport;
-    const url = `${config.adsbBase}/lat/${lat.toFixed(4)}/lon/${lon.toFixed(4)}/dist/${Math.round(radiusNm)}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(8_000), headers: { "User-Agent": "second-sight-hackathon" } });
-    if (!res.ok) throw new Error(`adsb.lol HTTP ${res.status}`);
-    const body = (await res.json()) as { ac?: Record<string, unknown>[] };
-    const snap: Snapshot = { ts: Date.now(), ac: (body.ac ?? []).map(trim) };
+    const errors: string[] = [];
+    let list: Record<string, unknown>[] | null = null;
+    for (const p of PROVIDERS) {
+      if ((cooldownUntil.get(p.name) ?? 0) > Date.now()) continue;
+      try {
+        const res = await fetch(p.url(lat, lon, Math.round(radiusNm)), { signal: AbortSignal.timeout(8_000), headers: { "User-Agent": "second-sight-hackathon" } });
+        if (!res.ok) {
+          // Rate limited or down: skip this provider for a minute and try the next one.
+          cooldownUntil.set(p.name, Date.now() + (res.status === 429 ? 60_000 : 20_000));
+          errors.push(`${p.name} HTTP ${res.status}`);
+          continue;
+        }
+        const body = (await res.json()) as { ac?: Record<string, unknown>[]; aircraft?: Record<string, unknown>[] };
+        list = body.ac ?? body.aircraft ?? [];
+        if (activeProvider !== p.name) {
+          console.log(`[source] ADS-B provider: ${p.name}`);
+          activeProvider = p.name;
+        }
+        break;
+      } catch (e) {
+        cooldownUntil.set(p.name, Date.now() + 20_000);
+        errors.push(`${p.name} ${(e as Error).message}`);
+      }
+    }
+    if (!list) throw new Error(errors.length ? errors.join("; ") : "all ADS-B providers cooling down");
+    const snap: Snapshot = { ts: Date.now(), ac: list.map(trim) };
     await this.dirReady;
     appendFile(this.file, JSON.stringify(snap) + "\n").catch((e) => console.error("[recorder]", e.message));
     return snap;
@@ -93,6 +123,11 @@ export class ReplaySource implements Source {
     if (lines.length < 2) return { error: `Recording ${pick} for ${airport.icao} is too short to replay.` };
     console.log(`[replay] ${airport.icao} ${pick}: ${lines.length} snapshots${scenario ? " + scenario" : ""}`);
     return new ReplaySource(lines, pick, scenario, airport);
+  }
+
+  /** Optional: CA/BOUNDARY only for pairs/aircraft involving these callsigns (scenario.json "focusCallsigns"). */
+  get focusCallsigns(): Set<string> | null {
+    return this.scenario?.focusCallsigns?.length ? new Set(this.scenario.focusCallsigns) : null;
   }
 
   /** Seconds since replay start, looped over the recording length. */

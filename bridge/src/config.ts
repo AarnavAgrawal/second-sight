@@ -9,6 +9,8 @@ export const config = {
   pollMs: 5_000,
   /** Terminal-area rule: only aircraft below this altitude are handed off between sectors. */
   handoffCeilingFt: Number(process.env.HANDOFF_CEILING_FT || 18_000),
+  /** Conflict alert ignores pairs where both aircraft are below this height above the field (low-level GA). */
+  caFloorAglFt: Number(process.env.CA_FLOOR_AGL_FT || 2_500),
   adsbBase: process.env.ADSB_BASE_URL || "https://api.adsb.lol/v2",
   relayObserverUrl: process.env.RELAY_OBSERVER_URL || "https://agentrelay.com/observer",
 };

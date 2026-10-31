@@ -49,7 +49,8 @@ async function handle(req: Request): Promise<Response> {
   if (req.method === "GET" && path.startsWith("/airports/")) {
     const code = decodeURIComponent(path.slice("/airports/".length));
     const r = await resolveAirport(code);
-    return json(r, "error" in r ? 404 : 200);
+    // CLAUDE.md 11: the matching Airport itself, or { error, suggestions }.
+    return "error" in r ? json(r, 404) : json(r.airport);
   }
 
   if (req.method === "POST" && path === "/session") {

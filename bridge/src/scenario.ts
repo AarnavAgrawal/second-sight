@@ -18,6 +18,8 @@ export interface ScenarioInject {
   vertRateFpm?: number;
   /** Stop climbing/descending at this altitude. */
   levelOffFt?: number;
+  /** Discrete transponder code (defaults to 4 + last 3 hex digits), so SIM traffic is CA-eligible. */
+  squawk?: string;
 }
 
 export interface ScenarioBend {
@@ -36,6 +38,8 @@ export interface Scenario {
   durationSec?: number;
   inject?: ScenarioInject[];
   bend?: ScenarioBend[];
+  /** Replay-only: raise CA/BOUNDARY only for pairs/aircraft involving these callsigns (keeps the demo focused). */
+  focusCallsigns?: string[];
   note?: string;
 }
 
@@ -92,6 +96,7 @@ export function applyScenario(s: Scenario, ac: Record<string, unknown>[], tSec: 
         gs: i.gsKt,
         track: i.trackTrueDeg,
         baro_rate: leveled ? 0 : rate,
+        squawk: i.squawk ?? `4${i.hex.slice(-3)}`,
         seen: 0,
         seen_pos: 0,
       },

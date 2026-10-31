@@ -7,12 +7,49 @@ const j = (body: unknown, status = 200) => new Response(JSON.stringify(body), { 
 
 export async function extraRoutes(req: Request, url: URL): Promise<Response | null> {
   if (req.method === "POST" && url.pathname === "/clearance") {
-    const body = (await req.json().catch(() => ({}))) as { text?: string; override?: boolean; selectedHex?: string | null };
+    const body = (await req.json().catch(() => ({}))) as {
+      text?: string;
+      override?: boolean;
+      selectedHex?: string | null;
+      clearance?: { callsign: string; kind: "altitude" | "heading"; value: number; turn?: "left" | "right" };
+    };
     const text = (body.text || "").trim();
-    if (!text) return j({ issued: false, transcript: "", reason: "Say again. Empty transmission.", sayAgain: true, steps: [] }, 400);
+    if (!text && !body.clearance) return j({ issued: false, transcript: "", reason: "Say again. Empty transmission.", sayAgain: true, steps: [] }, 400);
+    const input = {
+      text: text || `${body.clearance!.callsign} ${body.clearance!.kind} ${body.clearance!.value}`,
+      override: !!body.override,
+      selectedHex: body.selectedHex ?? null,
+      ...(body.clearance ? { clearance: body.clearance } : {}),
+    };
     const t0 = Date.now();
-    const result = await runClearance({ text, override: !!body.override, selectedHex: body.selectedHex ?? null });
-    console.log(`[clearance] "${text}" -> ${result.issued ? "ISSUED" : "NOT ISSUED"} (${Date.now() - t0} ms) ${result.reason ?? result.phraseology ?? ""}`);
+    const logResult = (r: { issued: boolean; reason?: string; phraseology?: string }) =>
+      console.log(`[clearance] "${input.text}"${input.override ? " (OVERRIDE)" : ""} -> ${r.issued ? "ISSUED" : "NOT ISSUED"} (${Date.now() - t0} ms) ${r.reason ?? r.phraseology ?? ""}`);
+
+    // Streaming mode (CLAUDE.md 11: "stream step progress to the UI"): Server-Sent Events.
+    //   event: step   data: { id, status, detail, ms }   (one per workflow step as it completes)
+    //   event: result data: <same JSON as the non-streaming response>
+    const wantsStream = (req.headers.get("accept") || "").includes("text/event-stream") || url.searchParams.get("stream") === "1";
+    if (wantsStream) {
+      const enc = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          const send = (event: string, data: unknown) => controller.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+          try {
+            const result = await runClearance(input, (e) => send("step", e));
+            logResult(result);
+            send("result", result);
+          } catch (e) {
+            send("result", { issued: false, transcript: input.text, reason: (e as Error).message, steps: [] });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(stream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
+    }
+
+    const result = await runClearance(input);
+    logResult(result);
     return j(result);
   }
 

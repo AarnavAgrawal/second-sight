@@ -1,0 +1,53 @@
+{
+  "note": "Replay-only demo scenario (REPLAY badge). SIM101 (NORTH) and SIM202 (SOUTH) fly head-on on parallel tracks 2.4 NM apart either side of the sector boundary, 12 NM west of SFO; SIM202 descends through SIM101's altitude, so a cross-sector CA fires at injection (t~10 s) and NORTH starts an APREQ. SIM303 crosses SOUTH->NORTH 14 NM east of SFO at 9,000 ft for a clean handoff (BOUNDARY at t~25 s). Restart a run with POST /source {\"dataSource\":\"replay\"}. focusCallsigns limits CA/BOUNDARY to the scripted aircraft so the demo stays focused.",
+  "recording": "20261031-120144.jsonl",
+  "startOffsetSec": 0,
+  "durationSec": 240,
+  "inject": [
+    {
+      "hex": "5c0101",
+      "callsign": "SIM101",
+      "typeCode": "B738",
+      "startSec": 10,
+      "endSec": 230,
+      "lat": 37.63981,
+      "lon": -122.7725,
+      "altFt": 7000,
+      "gsKt": 250,
+      "trackTrueDeg": 90,
+      "vertRateFpm": 0
+    },
+    {
+      "hex": "5c0202",
+      "callsign": "SIM202",
+      "typeCode": "A320",
+      "startSec": 10,
+      "endSec": 230,
+      "lat": 37.59981,
+      "lon": -122.4821,
+      "altFt": 8000,
+      "gsKt": 250,
+      "trackTrueDeg": 270,
+      "vertRateFpm": -1200,
+      "levelOffFt": 6500
+    },
+    {
+      "hex": "5c0303",
+      "callsign": "SIM303",
+      "typeCode": "E75L",
+      "startSec": 5,
+      "endSec": 230,
+      "lat": 37.53648,
+      "lon": -122.0803,
+      "altFt": 9000,
+      "gsKt": 220,
+      "trackTrueDeg": 0,
+      "vertRateFpm": 0
+    }
+  ],
+  "focusCallsigns": [
+    "SIM101",
+    "SIM202",
+    "SIM303"
+  ]
+}

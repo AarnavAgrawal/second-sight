@@ -86,7 +86,7 @@ if (!climber) {
 
 // ---- 4. Unable with alternative: find a clearance that the probe rejects for traffic ----
 let unableCase: { cs: string; value: number; alt: boolean } | null = null;
-const candidates: { cs: string; value: number; alt: boolean }[] = [];
+const candidates: { cs: string; value: number; alt: boolean; score: number }[] = [];
 for (const a of traffic) {
   if (a.altFt == null || a.status !== "none" || !/^[A-Z]{3}\d/.test(a.callsign)) continue;
   for (const b of traffic) {
@@ -94,14 +94,21 @@ for (const a of traffic) {
     const value = Math.round(b.altFt / 100) * 100;
     if (value < airport.elevationFt + 1600 || Math.abs(value - a.altFt) < 1000) continue;
     const pr = probeClearance(toPos(a), { kind: "altitude", value }, positions, airport);
-    if (!pr.ok && pr.conflicts.length) candidates.push({ cs: a.callsign, value, alt: !!pr.alternative });
+    // Prefer conflicts with margin (well inside 3 NM, not imminent) so traffic movement between our
+    // snapshot and the bridge's probe doesn't flip the result.
+    const c = pr.conflicts[0];
+    if (!pr.ok && c) candidates.push({ cs: a.callsign, value, alt: !!pr.alternative, score: c.minLatNm + (c.inSec < 20 ? 5 : 0) });
   }
 }
-unableCase = candidates.find((c) => c.alt) ?? candidates[0] ?? null;
+candidates.sort((x, y) => Number(y.alt) - Number(x.alt) || x.score - y.score);
+unableCase = candidates[0] ?? null;
 if (!unableCase) {
   console.log("SKIP  no clearance-into-traffic case in current traffic");
 } else {
   const r = await post("/clearance", { text: `${unableCase.cs} ${unableCase.value}`, clearance: { callsign: unableCase.cs, kind: "altitude", value: unableCase.value } });
+  if (r.probe?.ok) {
+    console.log(`SKIP  traffic moved before the bridge probed it (probe passed, ${r.issued ? "issued" : r.reason}); rerun for an Unable case`);
+  } else {
   ok(r.issued === false && !!r.reason, `Unable: ${r.reason}`);
   if (unableCase.alt) ok(!!r.alternative?.text && !!r.alternative?.callsign, `alternative offered: ${r.alternative?.text}`);
   else console.log("      (probe found no clean alternative for this case; that is valid)");
@@ -110,6 +117,7 @@ if (!unableCase) {
     const alt = r.alternative;
     const r2 = await post("/clearance", { text: alt.text, clearance: { callsign: alt.callsign, kind: alt.kind, value: alt.value, ...(alt.turn ? { turn: alt.turn } : {}) } });
     ok(r2.issued === true || /No response from sector/.test(r2.reason ?? ""), `Issue alternative -> ${r2.issued ? `issued: ${r2.phraseology}` : r2.reason}`);
+  }
   }
 }
 

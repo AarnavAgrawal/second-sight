@@ -36,24 +36,36 @@ async function fallbackFeed(from: string, to: string, text: string) {
   await airspace().appendFeed({ ts: Date.now(), from, to, text });
 }
 
-export async function postRadar(text: string, data: Record<string, unknown>): Promise<void> {
-  console.log(`[radar] ${text}`);
-  try {
-    if (radar) await radar.post("radar", text, data);
-    else await fallbackFeed("RADAR", "#radar", text);
-  } catch (e) {
-    console.error("[radar] post failed:", (e as Error).message);
-    await fallbackFeed("RADAR", "#radar", text).catch(() => {});
-  }
+// Outgoing posts go through an ordered background queue so a slow or unavailable Relay never
+// blocks the 5 s radar loop (conflict alert and boundary detection keep running on time).
+// If a post fails, the event is written straight to the Airspace feed so the UI still shows it.
+let outChain: Promise<unknown> = Promise.resolve();
+let pending = 0;
+
+function enqueue(who: "CIC" | "RADAR", channel: Channel, text: string, data?: Record<string, unknown>): void {
+  pending++;
+  if (pending > 50) console.warn(`[relay] ${pending} posts queued (Relay slow or down)`);
+  outChain = outChain
+    .then(async () => {
+      const r = who === "CIC" ? cic : radar;
+      try {
+        if (r) await r.post(channel, text, data);
+        else await fallbackFeed(who, `#${channel}`, text);
+      } catch (e) {
+        console.error(`[relay] ${who} post failed, writing to feed directly:`, (e as Error).message);
+        await fallbackFeed(who, `#${channel}`, text).catch(() => {});
+      }
+    })
+    .finally(() => pending--);
 }
 
+/** Post a machine event to #radar. Returns immediately (queued). */
+export async function postRadar(text: string, data: Record<string, unknown>): Promise<void> {
+  console.log(`[radar] ${text}`);
+  enqueue("RADAR", "radar", text, data);
+}
+
+/** Post as CIC or RADAR to a channel. Returns immediately (queued). */
 export async function postAs(who: "CIC" | "RADAR", channel: Channel, text: string, data?: Record<string, unknown>): Promise<void> {
-  const r = who === "CIC" ? cic : radar;
-  try {
-    if (r) await r.post(channel, text, data);
-    else await fallbackFeed(who, `#${channel}`, text);
-  } catch (e) {
-    console.error(`[relay] ${who} post failed:`, (e as Error).message);
-    await fallbackFeed(who, `#${channel}`, text).catch(() => {});
-  }
+  enqueue(who, channel, text, data);
 }

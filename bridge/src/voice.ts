@@ -6,6 +6,8 @@
 // - keyterm: Nova-3 only, repeat `keyterm=` per term, multi-word phrases allowed (space -> `+` or `%20`).
 //   No fixed count limit; the hard limit is 500 tokens across all keyterms per request
 //   ("Keyterm limit exceeded"). Docs recommend the 20-50 most important terms.
+//   Measured Oct 31: estimateKeytermTokens over-counts real ATC terms by ~15-20% (72 spoken callsigns
+//   accepted = 613 estimated tokens), so the 450 estimated-token cap lands near ~380 real tokens.
 // - Aura-2 REST /v1/speak: JSON body { text }, max 2000 characters (413 above that). Default output is MP3.
 
 import { haversineNm } from "../../shared/geo.ts";
@@ -105,8 +107,16 @@ export function buildKeyterms(input: {
   return out;
 }
 
-function listenUrl(keyterms: string[]): string {
-  const q = new URLSearchParams({ model: "nova-3", smart_format: "true", language: "en" });
+/**
+ * punctuate=true, NOT smart_format (measured Oct 31 against Aura-2 clips): smart_format rewrites ATC number
+ * forms in ways that hurt the parse, e.g. "November three four five alpha bravo" -> "11/03/1945 AB" (date
+ * formatting) and "Southwest twenty-one forty" -> "Southwest 2,140". Plain words with punctuation keep the
+ * spoken form, which is what the Claude clearance parser and the spoken-callsign keyterms expect.
+ */
+export const LISTEN_PARAMS: Record<string, string> = { model: "nova-3", punctuate: "true", language: "en" };
+
+export function listenUrl(keyterms: string[]): string {
+  const q = new URLSearchParams(LISTEN_PARAMS);
   for (const k of keyterms) q.append("keyterm", k); // URLSearchParams encodes spaces as "+", which Deepgram accepts
   return `${DG_BASE}/listen?${q.toString()}`;
 }

@@ -4,6 +4,7 @@ import {
   buildKeyterms,
   clampTtsText,
   estimateKeytermTokens,
+  listenUrl,
   MAX_KEYTERM_TOKENS,
   MAX_KEYTERMS,
   speak,
@@ -81,6 +82,17 @@ describe("buildKeyterms", () => {
   });
 });
 
+describe("listen URL", () => {
+  test("nova-3 with punctuation, no smart_format, one keyterm param per term", () => {
+    const u = new URL(listenUrl(["climb and maintain", "United one twenty-three"]));
+    expect(u.pathname).toBe("/v1/listen");
+    expect(u.searchParams.get("model")).toBe("nova-3");
+    expect(u.searchParams.get("punctuate")).toBe("true");
+    expect(u.searchParams.has("smart_format")).toBe(false); // it turns "November three four five" into a date
+    expect(u.searchParams.getAll("keyterm")).toEqual(["climb and maintain", "United one twenty-three"]);
+  });
+});
+
 describe("TTS helpers", () => {
   test("voice mapping", () => {
     expect(voiceModel("aura-2-zeus-en")).toBe("aura-2-zeus-en");
@@ -120,6 +132,14 @@ describe("live Deepgram round trip", () => {
       console.log(`[voice.test] transcript="${r.transcript}" confidence=${r.confidence} ms=${r.ms}`);
       expect(r.transcript.toLowerCase()).toContain("united");
       expect(r.transcript.toLowerCase()).toMatch(/climb/);
+
+      // N-number + "six thousand five hundred": stays in spoken words (smart_format made it "11/03/1945 AB ... 6,500").
+      const n = await speak("November three four five alpha bravo, maintain six thousand five hundred.", "SOUTH");
+      expect(voiceModel("SOUTH")).not.toBe(voiceModel("NORTH"));
+      const rn = await transcribe(n.audio, n.contentType, keyterms);
+      console.log(`[voice.test] transcript="${rn.transcript}" ms=${rn.ms}`);
+      expect(rn.transcript.toLowerCase()).toContain("november three four five alpha bravo");
+      expect(rn.transcript).not.toMatch(/\d/);
     },
     30_000,
   );

@@ -4,12 +4,13 @@
 //     against every callsign on radar within ±150 s (not just the nearest snapshot: recordings have gaps).
 //  2. A controller clearance still unmatched takes the callsign of the pilot readback that repeats it within 20 s.
 //   bun run listener:match [ICAO]
+import { fileURLToPath } from "node:url";
 import { readdirSync, readFileSync } from "node:fs";
 import { evalLog } from "../../shared/adapters/actors.ts";
 import { consistentWithSpoken, matchCallsign, type MatchMethod } from "../../shared/callsignMatch.ts";
 import type { HeardTransmission } from "../../shared/types.ts";
 
-const ROOT = new URL("../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../", import.meta.url)); // not .pathname: breaks on Windows paths
 const WINDOW_MS = 150_000;
 const READBACK_MS = 20_000;
 

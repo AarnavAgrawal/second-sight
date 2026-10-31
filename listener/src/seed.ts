@@ -3,10 +3,12 @@
 //   bun run listener:import [ICAO]   data/eval/<ICAO>/heard.jsonl -> EvalLog (rows already stored are kept)
 // The bridge also imports automatically on the first /eval request when EvalLog is empty.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { evalLog } from "../../shared/adapters/actors.ts";
 import type { HeardTransmission } from "../../shared/types.ts";
 
-const ROOT = new URL("../../", import.meta.url).pathname;
+// fileURLToPath (not URL.pathname): on Windows .pathname gives "/C:/..." with %20 for spaces, which fs can't open.
+const ROOT = fileURLToPath(new URL("../../", import.meta.url));
 export const seedPath = (icao: string) => `${ROOT}data/eval/${icao.toUpperCase()}/heard.jsonl`;
 
 export async function exportHeard(icao: string): Promise<number> {

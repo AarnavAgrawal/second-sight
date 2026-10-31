@@ -1,6 +1,7 @@
 // Parse transcribed transmissions into heard clearances and store them on the EvalLog actor.
 //   bun run listener:parse [ICAO] [transmissions.jsonl]
 // Callsigns are matched against every aircraft on radar within ±150 s, then a deterministic matching pass runs.
+import { fileURLToPath } from "node:url";
 import { existsSync, readFileSync } from "node:fs";
 import { evalLog } from "../../shared/adapters/actors.ts";
 import { spokenCallsign } from "../../shared/telephony.ts";
@@ -8,7 +9,7 @@ import type { HeardTransmission } from "../../shared/types.ts";
 import { parseTransmission } from "../../mastra/src/agents/transmission.ts";
 import { loadRadar, radarAround, rematch } from "./match.ts";
 
-const ROOT = new URL("../../", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("../../", import.meta.url)); // not .pathname: breaks on Windows paths
 const CONCURRENCY = 8;
 
 type Tx = { id: string; feed: string; ts: number; durSec: number; text: string };

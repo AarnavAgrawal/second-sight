@@ -12,7 +12,12 @@ Types referenced below are in [`shared/types.ts`](../shared/types.ts) (CLAUDE.md
 ## Running the backend
 
 ```powershell
-# 1. Terse actors (local runtime only exists for Linux, so it runs in WSL Ubuntu)
+# 1. Terse actors: hosted on the Terse platform (project second-sight-actors). With these two lines in .env
+#    no local actor runtime is needed:
+#      TERSE_ACTOR_URL=https://api.useterse.ai/cmvwv4a710119jy2aamkzrzfb/actors
+#      TERSE_API_KEY=<key from https://app.useterse.ai/app/api-tokens>
+#    Redeploy after changing actor/: wsl -d Ubuntu -u root -- bash scripts/deploy-actors.sh
+#    Or run them locally instead (Linux-only runtime, so WSL Ubuntu), with the local TERSE_ACTOR_URL:
 wsl -d Ubuntu -u root -- bash scripts/actor-dev.sh
 # 2. Bridge (ADS-B poller, conflict alert, HTTP API, RADAR on Relay)
 bun run bridge

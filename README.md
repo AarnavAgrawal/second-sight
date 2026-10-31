@@ -37,6 +37,7 @@ bun run web                                          # UI on :5173
 ```
 
 - `bun run backend` starts the bridge and all three agents in one terminal (prefixed logs).
+- **Hosted actors (Terse platform):** `wsl -d Ubuntu -u root -- bash scripts/deploy-actors.sh` deploys `actor/` (it runs `scripts/sync-actor-shared.ts` first, because the deploy uploads only `actor/`). Then set `TERSE_ACTOR_URL=https://api.useterse.ai/cmvwv4a710119jy2aamkzrzfb/actors` and `TERSE_API_KEY` in `.env`; the WSL dev server is no longer needed.
 - Frontend API contract: [`docs/API.md`](docs/API.md).
 - AI behavior check (smart option, issue, confirm, coordinate/point out, say again, agreements): `bun scripts/ai-check.ts replay`.
 - Record traffic for replay: `bun scripts/record.ts KSFO 20`; check a scenario offline: `bun scripts/scenario-offline.ts KSFO`.

@@ -13,3 +13,5 @@ dist/
 .claude/worktrees/
 # Demo replay recording used by data/recordings/KSFO/scenario.json since 12:55 (21 min, 5.4 MB)
 !data/recordings/KSFO/20261031-123209.jsonl
+# Generated copy of shared/ for terse deploy (scripts/sync-actor-shared.ts)
+actor/src/shared/

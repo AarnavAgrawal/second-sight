@@ -18,9 +18,9 @@ import type {
   Sector,
   Status,
   TrafficEntry,
-} from "../../shared/types.ts";
-import { evaluateConformance } from "../../shared/conformance.ts";
-import { mergeTraffic } from "../../shared/traffic.ts";
+} from "./shared/types.ts";
+import { evaluateConformance } from "./shared/conformance.ts";
+import { mergeTraffic } from "./shared/traffic.ts";
 
 const HANDOFF_DUE_MS = 30_000;
 const CONFLICT_DUE_MS = 30_000;

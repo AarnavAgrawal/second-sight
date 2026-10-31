@@ -21,5 +21,3 @@ data/atc/
 !data/recordings/KSFO/20261031-114726.jsonl
 !data/recordings/KSFO/20261031-120749.jsonl
 !data/recordings/KSFO/20261031-121012.jsonl
-# Heard transmissions export (LiveATC-derived transcripts): kept out of this public repo
-data/eval/

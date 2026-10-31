@@ -52,10 +52,10 @@ controller gave, it shows what Second Sight would have ruled at that moment of r
 actually flew.
 
 - **ADS-B recordings** for 18:47-20:32Z are committed in `data/recordings/KSFO/`.
-- **Heard transmissions** (transcribed LiveATC audio) live in the local `EvalLog` actor and are not in this public repo.
-  To view them on another machine, copy `data/eval/KSFO/heard.jsonl` over (export it with
-  `bun run listener:export KSFO`). The bridge loads it automatically on the first `/eval` request, or run
-  `bun run listener:import KSFO`.
+- **Heard transmissions** (transcribed NorCal Approach audio from the LiveATC archive) are committed in
+  `data/eval/KSFO/heard.jsonl`. The `EvalLog` actor is local SQLite, so the bridge loads this file automatically on the
+  first `/eval` request (or run `bun run listener:import KSFO`). After re-transcribing, refresh it with
+  `bun run listener:export KSFO`. The audio itself stays out of git.
 - To rebuild from audio: put LiveATC archive MP3s in `data/recordings/KSFO/`, then
   `bun run listener backfill KSFO` (transcribes in a Superserve sandbox; needs `SUPERSERVE_API_KEY` and a
   `second-sight-openai` secret), `bun run listener pull KSFO`, `bun run listener:parse KSFO`.

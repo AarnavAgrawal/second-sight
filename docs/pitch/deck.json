@@ -3,7 +3,7 @@
   "createdOnFiles": { "v": 1, "at": "2026-10-31T21:20:00Z" },
   "lists": "css",
   "title": "Second Sight",
-  "order": ["cover", "why", "staffing", "what", "how", "actors", "relay", "superserve", "close"],
+  "order": ["cover", "why", "staffing", "what", "how", "actors", "demo-good", "demo-bad", "relay", "superserve", "close"],
   "sections": {
     "s1": { "description": "Second Sight: an AI second set of eyes for air traffic controllers.", "start": "cover" },
     "s2": { "description": "Why: one overloaded controller, no conflict alert, no line to the next sector.", "start": "why" },

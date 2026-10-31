@@ -1,7 +1,7 @@
 // Shadow evaluation: what the real controller said (heard on the frequency), what Second Sight would have
 // ruled at that moment, and what the aircraft actually did (recorded ADS-B). Data from GET /eval/:icao.
 import { useEffect, useMemo, useState } from "react";
-import type { ClearanceEval, ConflictEval, EvalReport, OutcomeResult } from "@shared/types.ts";
+import type { ClearanceEval, ConflictEval, EvalReport, OutcomeResult, SeparationBasis } from "@shared/types.ts";
 import { BRIDGE_URL } from "../api.ts";
 
 const hhmm = (ts: number) => new Date(ts).toISOString().slice(11, 16) + "Z";
@@ -20,6 +20,16 @@ const OUTCOME_LABEL: Record<OutcomeResult, string> = {
 };
 
 type ClrFilter = "all" | "unable" | "not_complied";
+
+/** Plain-English separation rule that applied (shared/separation.ts pairRule). */
+const BASIS_TEXT: Record<SeparationBasis, string> = {
+  standard: "standard 3 NM / 1,000 ft",
+  high_altitude: "5 NM above FL180",
+  vfr_mixed: "VFR traffic, 1.5 NM / 500 ft",
+  vfr_pair: "VFR traffic advisory",
+  final_suppressed: "both on final",
+  visual: "visual separation",
+};
 
 export function EvalDashboard({ icao }: { icao: string }) {
   const [report, setReport] = useState<EvalReport | null>(null);
@@ -189,7 +199,9 @@ function Timeline({ full, range, setRange }: { full: EvalReport; range: { from: 
 
 function Kpis({ r }: { r: EvalReport }) {
   const { coverage: cv, kpis: k } = r;
-  const scored = k.issue + k.coordinate + k.unable;
+  // Older bridges don't send the new fields: derive what we can.
+  const ruled = k.ruled ?? k.issue + k.coordinate + k.unable;
+  const wouldIssue = k.wouldIssue ?? k.issue + k.coordinate;
   return (
     <section className="kpis">
       <div className="kpi">
@@ -208,16 +220,28 @@ function Kpis({ r }: { r: EvalReport }) {
         </div>
       </div>
       <div className="kpi">
-        <div className="kpi-label">Second Sight agreed</div>
-        <div className="kpi-value ok">{pct(k.agreed, scored)}</div>
+        <div className="kpi-label">Second Sight would issue</div>
+        <div className="kpi-value ok">{pct(wouldIssue, ruled)}</div>
         <div className="kpi-note">
-          Would have issued the controller's clearance ({k.issue} directly, {k.coordinate} after coordinating) and the aircraft flew it: {k.agreed} of {scored}.
+          {wouldIssue} of {ruled} controller clearances: {k.issue} directly, {k.coordinate} after coordinating with the other sector.
+        </div>
+      </div>
+      <div className="kpi">
+        <div className="kpi-label">Agreed (outcome observed)</div>
+        <div className="kpi-value ok">{k.observed != null ? pct(k.agreedObserved ?? 0, k.observed) : "—"}</div>
+        <div className="kpi-note">
+          Would issue it and the aircraft flew it: {k.agreedObserved ?? "—"} of {k.observed ?? "—"} whose outcome was seen
+          {k.inProgress != null ? ` (${k.inProgress} still in progress when the window ended, excluded)` : ""}.
         </div>
       </div>
       <div className="kpi">
         <div className="kpi-label">Second Sight: unable</div>
         <div className="kpi-value warn">{k.unable}</div>
-        <div className="kpi-note">Controller clearances our probe would have refused. Each is either a real hazard or our probe being stricter than a human.</div>
+        <div className="kpi-note">
+          Controller clearances our probe would have refused
+          {k.unableActuallyClose != null ? `: ${k.unableActuallyClose} of ${k.unable} came inside separation anyway (recorded ADS-B, next 150 s)` : ""}. Each is
+          either a real hazard or our probe being stricter than a human.
+        </div>
       </div>
       <div className="kpi">
         <div className="kpi-label">Conflict alerts (replayed)</div>
@@ -250,6 +274,16 @@ function ClearanceRow({ c }: { c: ClearanceEval }) {
       <td>
         <span className={`tag d-${r.decision}`}>{r.decision.toUpperCase()}</span>
         {r.decision !== "issue" && <div className="small">{r.reason}</div>}
+        {r.decision === "unable" && r.conflicts[0]?.basis && r.conflicts[0].basis !== "standard" && (
+          <div className="small dim">Minimum: {BASIS_TEXT[r.conflicts[0].basis]}</div>
+        )}
+        {c.actualSeparation && (
+          <div className="small dim">
+            Actual: {c.actualSeparation.minLatNm ?? "—"} NM / {c.actualSeparation.vertAtMinFt ?? "—"} ft from {c.actualSeparation.with}
+            {c.actualSeparation.inside ? " (came inside)" : " (stayed outside)"}
+          </div>
+        )}
+        {r.note && <div className="small dim">{r.note}</div>}
         {r.alternative && <div className="small dim">Suggest: {r.alternative}</div>}
       </td>
       <td>
@@ -367,8 +401,15 @@ function Method({ r }: { r: EvalReport }) {
           <b>Aircraft did:</b> recorded ADS-B within 4 min (altitude, ±300 ft) or 2 min (heading, ±20° magnetic track) after the clearance.
         </li>
         <li>
-          <b>Conflict alerts</b> use the live rules (IFR only, terminal filters). "Inside minima" means inside 3 NM and 1,000 ft. Parallel approaches
-          and visual separation legitimately go inside radar minima, so this is not a count of losses of separation.
+          <b>Separation rules</b> (probe and conflict alerts, same as live): 3 NM / 1,000 ft; 5 NM when both are at or above FL180; 1.5 NM / 500 ft
+          between VFR and IFR; VFR/VFR pairs get a traffic advisory, not an alert; no alert between two aircraft established on final (within 12 NM,
+          below 4,000 ft above the field, descending, closing). Here only, Second Sight also uses what was heard: aircraft cleared in the previous 2 min
+          are projected flying that clearance, and a "traffic in sight" / "maintain visual separation" call in the previous 5 min counts as visual
+          separation.
+        </li>
+        <li>
+          <b>Conflict alerts</b> use the live eligibility (squawking targets, CA floor). "Inside minima" means inside the minimum that applied to the
+          pair. Visual separation and approach procedures legitimately go inside radar minima, so this is not a count of losses of separation.
         </li>
         <li>Assists a controller, does not replace one. The real aircraft never heard Second Sight.</li>
       </ul>

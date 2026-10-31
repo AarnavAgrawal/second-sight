@@ -2,6 +2,7 @@
 export * from "./types.ts";
 export * from "./geo.ts";
 export * from "./format.ts";
+export * from "./projection.ts";
 export * from "./separation.ts";
 export * from "./probe.ts";
 export * from "./conformance.ts";

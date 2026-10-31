@@ -8,6 +8,7 @@ import type {
   ClearanceRequest,
   Position,
   Sector,
+  SeparationContext,
 } from "./types.ts";
 import { angleDiff, haversineNm, sectorOf, toHeading, trueToMag } from "./geo.ts";
 import { roundTo } from "./format.ts";
@@ -76,13 +77,14 @@ function headingOptions(magTrack: number, requested: ClearanceRequest | null, go
  * sorted by smallest deviation from the request (ids "c1".."cN" in that order).
  * With `requested` null (resolve_conflict, handoff_condition), options are based on the current altitude
  * and magnetic track, and deviation is measured from the current state.
+ * `ctx` (intents, visual separation) is passed to the probe.
  */
 export function generateCandidates(
   ac: Position,
   requested: ClearanceRequest | null,
   traffic: Position[],
   airport: Airport,
-  opts: { goal?: CandidateGoal; agreements?: Agreement[]; owner?: Sector; now?: number; max?: number } = {},
+  opts: { goal?: CandidateGoal; agreements?: Agreement[]; owner?: Sector; now?: number; max?: number; ctx?: SeparationContext } = {},
 ): Candidate[] {
   const goal = opts.goal ?? (requested ? "cic_request" : "resolve_conflict");
   const max = opts.max ?? 6;
@@ -114,7 +116,7 @@ export function generateCandidates(
       const d = angleDiff(magTrack, o.value);
       if (Math.abs(d) >= 0.5) req.turn = d > 0 ? "right" : "left";
     }
-    if (!probeClearance(ac, req, traffic, airport).ok) continue;
+    if (!probeClearance(ac, req, traffic, airport, opts.ctx).ok) continue;
 
     let deviation: number;
     if (o.kind === "altitude") {

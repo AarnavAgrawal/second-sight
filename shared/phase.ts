@@ -1,7 +1,7 @@
 // Estimated flight phase (ai-updates.md 3b). A heuristic from position and vertical rate, not a flight plan.
 import type { Airport, FlightPhase, Position } from "./types.ts";
 import { haversineNm } from "./geo.ts";
-import { projectStraight } from "./separation.ts";
+import { projectStraight } from "./projection.ts";
 
 export const DEPARTURE_RADIUS_NM = 25;
 export const ARRIVAL_RADIUS_NM = 40;

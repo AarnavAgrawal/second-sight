@@ -20,7 +20,7 @@ import type { Candidate, ClearanceRequest, ProbeResult, ReviewFacts, SectorRevie
 import { parseClearance } from "../agents/parser.ts";
 import { issueClearance } from "../ops.ts";
 import { fallbackReview, validateReview } from "../tools/review.ts";
-import { findAircraft, getView, toPosition } from "../view.ts";
+import { findAircraft, getView, separationContext, toPosition } from "../view.ts";
 
 // ---- dependencies injected by the bridge ----
 const deps: { relay: Relay | null; reviewTimeoutMs: number; pointOutTimeoutMs: number; mode: "agents" | "direct" } = {
@@ -275,7 +275,7 @@ const probeStep = createStep({
     const v = await getView();
     const t = v.traffic.find((x) => x.hex === f.hex);
     if (!v.airport || !t) return finish(log(f, "probe", "fail", "Aircraft lost.", t0), { issued: false, reason: "Unable. Radar contact lost." });
-    const probe = probeClearance(toPosition(t), toReq(f.parsed), v.positions, v.airport);
+    const probe = probeClearance(toPosition(t), toReq(f.parsed), v.positions, v.airport, separationContext(v));
     const g = { ...f, probe };
     return log(g, "probe", probe.ok ? "ok" : "fail", probe.ok ? "No conflicts. Valid." : probe.reasons.join(" "), t0);
   },
@@ -293,7 +293,7 @@ export async function buildFacts(f: Flow): Promise<ReviewFacts | null> {
   const agreements = activeAgreements(v.agreements ?? [], now);
   // Only aircraft that have had a clearance have an Aircraft actor; don't create empty ones.
   const prev = v.statuses[f.hex] ? (await aircraft(f.hex).getState()).clearance : null;
-  const candidates = generateCandidates(pos, req, v.positions, v.airport, { goal: "cic_request", agreements, owner: f.sector, now });
+  const candidates = generateCandidates(pos, req, v.positions, v.airport, { goal: "cic_request", agreements, owner: f.sector, now, ctx: separationContext(v, now) });
   const probe = f.probe as ProbeResult;
   return {
     phase: flightPhase(pos, v.airport),

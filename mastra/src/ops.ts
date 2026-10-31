@@ -5,7 +5,7 @@ import { clearanceWindow } from "../../shared/conformance.ts";
 import { clearancePhrase } from "../../shared/phraseology.ts";
 import { probeClearance } from "../../shared/probe.ts";
 import type { Clearance, ClearanceRequest, ProbeResult } from "../../shared/types.ts";
-import { findAircraft, getView, toPosition, type AirspaceView } from "./view.ts";
+import { findAircraft, getView, separationContext, toPosition, type AirspaceView } from "./view.ts";
 
 export type ProbeOutcome =
   | { ok: true; hex: string; callsign: string; probe: ProbeResult; phraseology: string; currentAltFt: number | null }
@@ -17,7 +17,7 @@ export async function probeFor(callsign: string, req: ClearanceRequest, view?: A
   const t = findAircraft(v, callsign);
   if (!t) return { ok: false, error: `${callsign} not in radar contact.` };
   const pos = toPosition(t);
-  const probe = probeClearance(pos, req, v.positions, v.airport);
+  const probe = probeClearance(pos, req, v.positions, v.airport, separationContext(v));
   return { ok: true, hex: t.hex, callsign: t.callsign, probe, phraseology: clearancePhrase(t.callsign, req, t.altFt), currentAltFt: t.altFt };
 }
 
@@ -35,7 +35,7 @@ export async function issueClearance(input: { callsign: string; req: ClearanceRe
   const t = findAircraft(v, input.callsign);
   if (!t) return { ok: false, error: `${input.callsign} not in radar contact.` };
   const pos = toPosition(t);
-  const probe = probeClearance(pos, input.req, v.positions, v.airport);
+  const probe = probeClearance(pos, input.req, v.positions, v.airport, separationContext(v));
   const override = !!input.override;
   if (!probe.ok && !override) return { ok: false, error: `Probe failed: ${probe.reasons.join(" ")}`, probe };
   const now = Date.now();

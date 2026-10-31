@@ -7,8 +7,8 @@ import {
   caPairAllowed,
   discreteSquawkSet,
   dropShadows,
+  squawkSet,
   HANDOFF_RETRY_AFTER_MS,
-  inApproachCorridor,
   latestHandoffByHex,
   type HandoffLike,
 } from "./filters.ts";
@@ -50,28 +50,24 @@ describe("discreteSquawkSet", () => {
   });
 });
 
-describe("inApproachCorridor", () => {
-  test("inside 6 NM and below 3,000 ft AGL", () => {
-    expect(inApproachCorridor(at(280, 4, { altFt: 2000 }), SFO)).toBe(true);
-  });
-  test("outside 6 NM or above 3,000 ft AGL", () => {
-    expect(inApproachCorridor(at(280, 7, { altFt: 2000 }), SFO)).toBe(false);
-    expect(inApproachCorridor(at(280, 4, { altFt: 3100 }), SFO)).toBe(false);
-  });
-  test("uses field elevation", () => {
-    const den = { ...SFO, elevationFt: 5434 };
-    const p = pos({ lat: den.lat, lon: den.lon, altFt: 8000 });
-    expect(inApproachCorridor(p, den)).toBe(true);
+describe("squawkSet", () => {
+  test("keeps every squawked target including VFR 1200, drops targets with no squawk", () => {
+    const s = squawkSet([
+      { hex: "A1B2C3", squawk: "4521" },
+      { hex: "vfr1", squawk: "1200" },
+      { hex: "none" },
+      { hex: "nul", squawk: null },
+      { hex: "blank", squawk: "" },
+      { squawk: "4000" },
+    ]);
+    expect([...s].sort()).toEqual(["a1b2c3", "vfr1"]);
   });
 });
 
 describe("caPairAllowed", () => {
   const FLOOR = 2500;
-  test("both in the approach corridor: not alerted", () => {
-    expect(caPairAllowed(at(280, 3, { altFt: 2800 }), at(100, 3, { altFt: 2900 }), SFO, 1000)).toBe(false);
-  });
-  test("one in the corridor, one outside: alerted", () => {
-    expect(caPairAllowed(at(280, 3, { altFt: 2800 }), at(100, 10, { altFt: 2900 }), SFO, 1000)).toBe(true);
+  test("near the field above the floor: allowed (final approach suppression is the shared pair rule's job)", () => {
+    expect(caPairAllowed(at(280, 3, { altFt: 2800 }), at(100, 3, { altFt: 2900 }), SFO, 1000)).toBe(true);
   });
   test("both below the CA floor: not alerted", () => {
     expect(caPairAllowed(at(0, 20, { altFt: 2000 }), at(0, 21, { altFt: 2400 }), SFO, FLOOR)).toBe(false);

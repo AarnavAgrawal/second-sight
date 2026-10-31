@@ -180,7 +180,7 @@ Apply `state`, then shallow-merge each `state_update.changes` (each changed top-
   clearanceLog: ClearanceLogEntry[];       // last 20 issued clearances { ts, hex, callsign, kind, value, turn?, phraseology, issuedBy }
 }
 ```
-`TrafficEntry` = `{ hex, callsign, typeCode, lat, lon, altFt, vertRateFpm, gsKt, trackTrueDeg, status, sector, ca, ts, seenSec }`.
+`TrafficEntry` = `{ hex, callsign, typeCode, lat, lon, altFt, vertRateFpm, gsKt, trackTrueDeg, status, sector, ca, ts, seenSec, isVfr? }` (`isVfr`: squawking 1200).
 
 - **Data block:** line 1 `callsign`; line 2 = altitude in hundreds (3 digits) + `↑` if `vertRateFpm > 500` / `↓` if `< -500` + ground speed in tens: `078↑ 28`. Helper: `dataBlock(altFt, vertRateFpm, gsKt)` in `shared/format.ts`.
 - **Status colors:** `none` white, `pending` amber, `conforming` green, `non_conforming` red, `coasting` gray + `CST`.

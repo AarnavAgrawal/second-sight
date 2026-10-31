@@ -70,6 +70,7 @@ export function mergeTraffic(input: MergeTrafficInput): MergeTrafficResult {
       ca: caHex.has(p.hex),
       ts: p.ts,
       seenSec: p.seenSec,
+      isVfr: p.isVfr ?? false,
     };
   });
 

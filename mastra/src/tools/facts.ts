@@ -2,10 +2,10 @@
 // over the live view, and point-out / handoff pre-checks. Plain code; the agent only reads the results.
 import { generateCandidates } from "../../../shared/candidates.ts";
 import { flightPhase } from "../../../shared/phase.ts";
-import { projectClearedPath } from "../../../shared/probe.ts";
-import { firstLoss, straightPath } from "../../../shared/separation.ts";
+import { pathFor, projectClearedPath } from "../../../shared/projection.ts";
+import { pairLoss, pairRule } from "../../../shared/separation.ts";
 import type { Candidate, CandidateGoal, ClearanceRequest, Directive, FlightPhase, Sector, TrafficEntry } from "../../../shared/types.ts";
-import { liveAgreements, liveDirectives, toPosition, type AirspaceView } from "../view.ts";
+import { liveAgreements, liveDirectives, separationContext, toPosition, type AirspaceView } from "../view.ts";
 
 /** A candidate plus the aircraft it belongs to (candidate ids "c1.." repeat across aircraft). */
 export type CandidateRef = Candidate & { callsign: string; hex: string };
@@ -62,6 +62,7 @@ export function candidatesFor(
     ...(owner ? { owner } : {}),
     now: Date.now(),
     ...(opts.max ? { max: opts.max } : {}),
+    ctx: separationContext(view),
   });
   return list.map((c) => ({ ...c, callsign: t.callsign, hex: t.hex }));
 }
@@ -88,7 +89,7 @@ export function handoffBlocks(view: AirspaceView, me: Sector): Directive[] {
 
 export interface PointOutCheck {
   clear: boolean;
-  /** My aircraft that would come within 3 NM and 1,000 ft of the requester's cleared path in 120 s. */
+  /** My aircraft that would lose separation (shared pair rule) with the requester's cleared path in 120 s. */
   traffic: { callsign: string; minLatNm: number; minVertFt: number; inSec: number }[];
   /** Directives that forbid this point out (altitude cap / floor violated by the requested altitude). */
   blocking: string[];
@@ -103,10 +104,15 @@ export function pointOutPrecheck(view: AirspaceView, me: Sector, hex: string, re
   const traffic: PointOutCheck["traffic"] = [];
   if (t && view.airport) {
     const p = toPosition(t);
-    const path = req ? projectClearedPath(p, req, view.airport.declinationDeg) : straightPath(p);
+    const ctx = separationContext(view);
+    const decl = view.airport.declinationDeg;
+    const path = req ? projectClearedPath(p, req, decl) : pathFor(p, ctx.intents?.get(hex), decl);
     for (const o of view.traffic) {
       if (o.hex === hex || o.altFt == null || view.trackControl[o.hex] !== me) continue;
-      const loss = firstLoss(path, straightPath(toPosition(o)));
+      const op = toPosition(o);
+      const r = pairRule(p, op, view.airport, ctx);
+      if (r.action !== "conflict") continue;
+      const loss = pairLoss(path, pathFor(op, ctx.intents?.get(o.hex), decl), r);
       if (loss) traffic.push({ callsign: o.callsign, minLatNm: Math.round(loss.minLatNm * 10) / 10, minVertFt: Math.round(loss.minVertFt / 100) * 100, inSec: loss.inSec });
     }
   }

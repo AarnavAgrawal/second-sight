@@ -76,7 +76,11 @@ Do not use crash imagery or Halloween jokes near this material in the UI or READ
 | **Conformance monitoring** | Checking whether an aircraft is doing what it was cleared to do. Status values: `none`, `pending`, `conforming`, `non_conforming`, `coasting`. |
 | **Coasting** | A track with no fresh position updates (we use 30 s). The scope shows `CST`. |
 | **Standard separation** | Terminal radar minimums: **3 NM lateral or 1,000 ft vertical**. |
-| **Loss of separation (LoS)** | Two aircraft inside both minimums at the same time. |
+| **High-altitude minimum** | When **both** aircraft are at or above 18,000 ft, the lateral minimum is **5 NM** (vertical stays 1,000 ft). |
+| **VFR** | An aircraft squawking `1200` (`isVfr` on `Position` and `TrafficEntry`). A VFR/IFR pair uses Class B VFR minima: **1.5 NM or 500 ft**. |
+| **Traffic advisory** | What a predicted close pass between **two VFR** aircraft produces instead of a CA: an `INFO` alert on the scope ("Traffic: N123AB and N456CD, 1.2 NM, 300 ft"), at most one per pair per 2 minutes. No Relay message, no agent turn, never fails a probe. |
+| **Final approach suppression** | No CA and no probe failure between two aircraft that are **both** established on final: within 12 NM of the airport, below field elevation + 4,000 ft, descending at 300 fpm or more, and getting closer to the airport. Covers side-by-side parallel approaches (SFO 28L/28R are 750 ft apart). |
+| **Loss of separation (LoS)** | Two aircraft inside both minimums that apply to the pair at the same time. |
 | **Conflict alert (CA)** | A predicted LoS within the next 2 minutes. Shown as `CA` on both data blocks. |
 | **Probe** | Checking a proposed clearance for conflicts and invalid values before it's issued. |
 | **Unable** | Response when a clearance or request can't be accepted. Always followed by the reason and, if possible, an alternative. |
@@ -298,12 +302,20 @@ Write tests for separation, conformance, and probe first. They're the core and t
 - **Sectors:** center = the active airport, radius `RADIUS_NM`. The boundary is the east-west line (latitude) through the airport. NORTH is above it, SOUTH below. All geometry takes the airport as a parameter.
 - **Magnetic variation:** ADS-B track is true; clearances assign magnetic headings. Convert with a World Magnetic Model package from npm (find one that works offline, e.g. `geomagnetism`). Compute declination once per airport on `configure`. Magnetic = true − east declination.
 - **Projection:** straight-line projection from `gs` and `track`, plus `vertRateFpm`, sampled every 10 s for 120 s.
-- **Separation check:** a pair loses separation at a sample if lateral < 3 NM **and** vertical < 1,000 ft. Use haversine distance in NM.
-- **Conflict alert (`conflictAlert`):** for all airborne pairs, project both aircraft. If any sample loses separation, return a CA with the first time, minimum lateral, and minimum vertical. Ignore pairs where both are below 1,000 ft above field elevation (final approach to parallel runways would false-alarm).
+- **Separation rules (`pairRule` in `shared/separation.ts`):** one rule function decides the minimum for each pair from its state now, and both the conflict alert and the probe use it, so they always agree. Every threshold is in the exported `SEPARATION` object. First match wins:
+  1. **Visual separation** (shadow evaluation only, from heard "traffic in sight" / "maintain visual separation" calls; the live system never hears pilots): no alert, both below 18,000 ft.
+  2. **Final approach suppression:** both on final (within 12 NM, below field elevation + 4,000 ft, descending at 300 fpm or more, getting closer to the airport): no alert.
+  3. **VFR pair** (both squawk 1200): traffic advisory only, never a CA or a probe failure (predicted pass inside 1.5 NM and 500 ft).
+  4. **VFR/IFR:** 1.5 NM / 500 ft.
+  5. **High altitude** (both at or above 18,000 ft): 5 NM / 1,000 ft.
+  6. **Standard:** 3 NM / 1,000 ft.
+- **Separation check:** a pair loses separation at a sample if lateral < the pair's lateral minimum **and** vertical < its vertical minimum. Use haversine distance in NM.
+- **Traffic flying a clearance:** an aircraft that received a clearance in the last 120 s (live: the `Airspace` clearance log, skipping `non_conforming` and `coasting` aircraft) is projected flying it (heading turn and/or climb or descent toward the cleared altitude) instead of straight.
+- **Conflict alert (`conflictAlert` / `conflictAndTrafficAlerts`):** for all airborne pairs, project both aircraft and apply the pair's rule. If any sample loses separation, return a CA with the first time, minimum lateral, minimum vertical, and the rule (`basis`). VFR/VFR pairs come back as traffic advisories, not CAs. Ignore pairs where both are below 1,000 ft above field elevation. The bridge passes every squawking target (VFR included, no-squawk TIS-B targets excluded) and still applies the CA floor (2,500 ft above the field).
 - **Clearance probe (`probeClearance`):** given an aircraft, a proposed clearance, and current traffic:
   - **Validity:** heading 001 to 360. Altitude from the simplified floor to FL450, in 100 ft steps. Altitudes at or above 18,000 ft must be expressed as flight levels.
   - **Simplified floor:** reject altitudes below field elevation + 1,500 ft. Reason: "Below simplified minimum altitude floor."
-  - **Conflict probe:** model the cleared aircraft's new profile (climb or descend at max(|current rate|, 1,500 fpm) toward the cleared altitude; for a heading, turn at standard rate, 3° per second, then fly straight) and project others straight. Any loss of separation in 120 s fails the probe.
+  - **Conflict probe:** model the cleared aircraft's new profile (climb or descend at max(|current rate|, 1,500 fpm) toward the cleared altitude; for a heading, turn at standard rate, 3° per second, then fly straight) and project others straight, or along the clearance they are flying. Each pair uses the same separation rules as the conflict alert: any loss of separation in 120 s fails the probe; VFR/VFR pairs, final-suppressed pairs, and visual separation never do.
   - **Alternative:** for a failed altitude clearance, search 1,000 ft steps toward the original altitude for the closest value that passes. For a failed heading, try ±20° and ±40°. Return the first that passes, or none.
 - **Altitude conformance:** within 300 ft of the cleared altitude = `conforming`. Moving toward it at more than 500 fpm = `conforming` (in progress). After the grace period, moving away from it at more than 500 fpm = `non_conforming`. No progress by the deadline = `non_conforming`. Reason strings are plain English: `Cleared to 4,000. Now 7,800 and climbing 1,800 fpm.`
 - **Heading conformance:** magnetic track within 20° of the cleared heading = `conforming` (the 20° allows for wind). Turning in the cleared direction toward it = `conforming`. Otherwise `non_conforming` after the grace period.

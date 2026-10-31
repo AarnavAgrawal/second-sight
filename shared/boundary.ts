@@ -1,7 +1,7 @@
 // Boundary approach detection (CLAUDE.md section 9).
 import type { Airport, Position, Sector } from "./types.ts";
 import { distToBoundaryNm, sectorOf } from "./geo.ts";
-import { projectStraight } from "./separation.ts";
+import { projectStraight } from "./projection.ts";
 
 export const BOUNDARY_LOOKAHEAD_SEC = 90;
 export const BOUNDARY_NEAR_NM = 4;

@@ -1,5 +1,6 @@
 // ADS-B normalizer: readsb-style JSON (adsb.lol /v2) -> Position[].
 import type { Airport, Position } from "./types.ts";
+import { SEPARATION } from "./separation.ts";
 
 export interface RawAircraft {
   hex?: string;
@@ -17,6 +18,8 @@ export interface RawAircraft {
   geom_rate?: number;
   seen?: number;
   seen_pos?: number;
+  /** Mode A code as a 4-digit string, e.g. "6257"; "1200" = VFR. */
+  squawk?: string;
   [k: string]: unknown;
 }
 
@@ -56,6 +59,7 @@ export function normalizeAdsb(raw: unknown, airport: Airport, nowMs: number): Po
     if (seenHex.has(hex)) continue;
     seenHex.add(hex);
     const registration = str(a.r);
+    const squawk = a.squawk == null ? null : String(a.squawk).trim() || null;
     out.push({
       hex,
       callsign: (str(a.flight) ?? registration ?? hexRaw).toUpperCase(),
@@ -69,6 +73,8 @@ export function normalizeAdsb(raw: unknown, airport: Airport, nowMs: number): Po
       vertRateFpm: num(a.baro_rate) ?? num(a.geom_rate) ?? 0,
       seenSec: seen,
       ts: Math.round(nowMs - seenPos * 1000),
+      squawk,
+      isVfr: squawk === SEPARATION.vfrSquawk,
     });
   }
   return out;

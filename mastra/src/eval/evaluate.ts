@@ -8,8 +8,9 @@ import { angleDiff, haversineNm, sectorOf, trueToMag } from "../../../shared/geo
 import { flightPhase } from "../../../shared/phase.ts";
 import { clearancePhrase } from "../../../shared/phraseology.ts";
 import { probeClearance } from "../../../shared/probe.ts";
+import { intentsFromLog } from "../../../shared/projection.ts";
 import { sectorEntry } from "../../../shared/sectorEntry.ts";
-import { conflictAlert } from "../../../shared/separation.ts";
+import { BASIS_LABEL, conflictAlert, minimaFor } from "../../../shared/separation.ts";
 import type {
   Airport,
   Clearance,
@@ -20,7 +21,9 @@ import type {
   HeardTransmission,
   OutcomeResult,
   Position,
+  ProbeConflict,
   ReviewFacts,
+  SeparationContext,
   ShadowRuling,
 } from "../../../shared/types.ts";
 import { fallbackReview } from "../tools/review.ts";
@@ -54,6 +57,45 @@ const TRACK_BEFORE_SEC = 60;
 const CA_LOOKAHEAD_SEC = 150;
 const CA_EPISODE_GAP_MS = 60_000;
 const ACTED_BEFORE_SEC = 30;
+/** Controller clearances heard this recently are "intents": the aircraft is projected flying them. */
+export const INTENT_WINDOW_SEC = 120;
+/** A visual-separation call heard this recently marks the aircraft as visually separated. */
+export const VISUAL_WINDOW_SEC = 300;
+/** Pilot has the traffic in sight, or the controller told them to maintain visual separation (7-2-1). */
+export const VISUAL_RE = /traffic in sight|have the traffic|have him in sight|maintain visual separation|visual separation/i;
+/** A controller asking for a report ("report traffic in sight") is not visual separation yet. */
+const VISUAL_REQUEST_RE = /\b(report|advise)\b[^.]*\bin sight/i;
+
+type IntentEntry = { hex: string; kind: ClearanceRequest["kind"]; value: number; turn?: ClearanceRequest["turn"]; ts: number };
+
+/** Controller clearances (plausible, matched to an aircraft) as an intent log for intentsFromLog. */
+export function intentLog(heard: HeardTransmission[]): IntentEntry[] {
+  const out: IntentEntry[] = [];
+  for (const h of heard) {
+    if (h.speaker !== "controller" || !h.hex) continue;
+    for (const c of h.clearances) {
+      if (!plausibleClearance(c)) continue;
+      out.push({ hex: h.hex, kind: c.kind, value: c.value, ...(c.turn ? { turn: c.turn } : {}), ts: h.ts });
+    }
+  }
+  return out.sort((a, b) => a.ts - b.ts);
+}
+
+/** Visual separation calls (pilot: the pilot's aircraft; controller: the addressed aircraft) as (hex, ts). */
+export function visualLog(heard: HeardTransmission[]): { hex: string; ts: number }[] {
+  return heard
+    .filter((h) => h.hex && VISUAL_RE.test(h.text) && !(h.speaker === "controller" && VISUAL_REQUEST_RE.test(h.text)))
+    .map((h) => ({ hex: h.hex!, ts: h.ts }))
+    .sort((a, b) => a.ts - b.ts);
+}
+
+/** Separation context at `now` from what was heard before it (intents: 120 s; visual separation: 5 min). */
+export function heardContext(intents: IntentEntry[], visual: { hex: string; ts: number }[], now: number): SeparationContext {
+  return {
+    intents: intentsFromLog(intents, now, INTENT_WINDOW_SEC),
+    visualHex: new Set(visual.filter((v) => v.ts <= now && v.ts >= now - VISUAL_WINDOW_SEC * 1000).map((v) => v.hex)),
+  };
+}
 
 /** Transcription/parse sanity: drops speeds read as altitudes ("one eight zero") and other impossible values. */
 export function plausibleClearance(req: ClearanceRequest): boolean {
@@ -135,10 +177,12 @@ export function shadowRuling(
   traffic: Position[],
   airport: Airport,
   prev: Clearance | null,
+  ctx?: SeparationContext,
 ): ShadowRuling {
   const owner = sectorOf(pos.lat, airport);
-  const candidates = generateCandidates(pos, req, traffic, airport, { goal: "cic_request", owner, now: pos.ts });
-  const probe = probeClearance(pos, req, traffic, airport);
+  const candidates = generateCandidates(pos, req, traffic, airport, { goal: "cic_request", owner, now: pos.ts, ...(ctx ? { ctx } : {}) });
+  const probe = probeClearance(pos, req, traffic, airport, ctx);
+  const note = ctx ? contextNote(pos, req, traffic, airport, ctx, probe.conflicts) : null;
   const facts: ReviewFacts = {
     phase: flightPhase(pos, airport),
     probe: { ...probe, alternatives: candidates },
@@ -152,12 +196,65 @@ export function shadowRuling(
   const requested = clearancePhrase(pos.callsign, req, pos.altFt);
   const blocked = !probe.ok || !!facts.recentConflict;
   if (!blocked && facts.sectorEntry.entersOther) {
-    return { decision: "coordinate", reason: `Issue after coordinating with ${facts.sectorEntry.sector ?? "the other sector"} (enters within 120 s).`, alternative: null, phase: facts.phase, conflicts: [] };
+    return { decision: "coordinate", reason: `Issue after coordinating with ${facts.sectorEntry.sector ?? "the other sector"} (enters within 120 s).`, alternative: null, phase: facts.phase, conflicts: [], note };
   }
-  if (!blocked) return { decision: "issue", reason: "Probe clean.", alternative: null, phase: facts.phase, conflicts: [] };
+  if (!blocked) return { decision: "issue", reason: "Probe clean.", alternative: null, phase: facts.phase, conflicts: [], note };
   const review = fallbackReview({ ...facts, sectorEntry: { entersOther: false } }, requested);
   const alt = review.chosenCandidateId ? (candidates.find((c) => c.id === review.chosenCandidateId)?.phraseology ?? null) : null;
-  return { decision: "unable", reason: review.reason.replace(/^Automatic fallback: /, ""), alternative: alt, phase: facts.phase, conflicts: probe.conflicts };
+  return { decision: "unable", reason: review.reason.replace(/^Automatic fallback: /, ""), alternative: alt, phase: facts.phase, conflicts: probe.conflicts, note };
+}
+
+const fmtReq = (r: ClearanceRequest) => (r.kind === "altitude" ? `to ${fmtAlt(r.value)}` : `heading ${fmtHdg(r.value)}`);
+
+/**
+ * What the heard context changed versus probing without it (everyone straight, no visual separation): traffic the
+ * context-free probe flags that the context clears, and why. Null when the context made no difference.
+ */
+function contextNote(pos: Position, req: ClearanceRequest, traffic: Position[], airport: Airport, ctx: SeparationContext, withCtx: ProbeConflict[]): string | null {
+  const bare = probeClearance(pos, req, traffic, airport).conflicts;
+  const still = new Set(withCtx.map((c) => c.withHex ?? c.with));
+  const cleared = bare.filter((c) => !still.has(c.withHex ?? c.with));
+  if (!cleared.length) return null;
+  const why = cleared.map((c) => {
+    const hex = c.withHex;
+    if (ctx.visualHex && (ctx.visualHex.has(pos.hex) || (hex && ctx.visualHex.has(hex)))) return `${c.with}: ${BASIS_LABEL.visual} (traffic in sight)`;
+    const it = hex ? ctx.intents?.get(hex) : undefined;
+    const parts = [it?.heading, it?.altitude].filter((x): x is ClearanceRequest => !!x).map(fmtReq);
+    if (parts.length) return `${c.with} is being vectored (${parts.join(", ")})`;
+    return `${c.with}: own clearance in progress`;
+  });
+  return `Clears with what was heard: ${why.join("; ")}.`;
+}
+
+/** Closest recorded approach between two aircraft from `ts` to ts + 150 s, and whether it came inside `minima`. */
+function actualApproach(snaps: EvalSnapshot[], hexA: string, hexB: string, ts: number, minima: { latNm: number; vertFt: number }) {
+  let minLat: number | null = null;
+  let vertAtMin: number | null = null;
+  let inside = false;
+  for (let i = Math.max(0, atOrBefore(snaps, ts)); i < snaps.length && snaps[i]!.ts <= ts + CA_LOOKAHEAD_SEC * 1000; i++) {
+    const pa = snaps[i]!.positions.find((p) => p.hex === hexA);
+    const pb = snaps[i]!.positions.find((p) => p.hex === hexB);
+    if (!pa || !pb) continue;
+    const lat = haversineNm(pa.lat, pa.lon, pb.lat, pb.lon);
+    const vert = pa.altFt != null && pb.altFt != null ? Math.abs(pa.altFt - pb.altFt) : null;
+    if (minLat == null || lat < minLat) (minLat = lat), (vertAtMin = vert);
+    if (vert != null && lat < minima.latNm && vert < minima.vertFt) inside = true;
+  }
+  return { minLatNm: minLat == null ? null : Math.round(minLat * 10) / 10, vertAtMinFt: vertAtMin == null ? null : Math.round(vertAtMin), inside };
+}
+
+/** Unable rulings: did the aircraft and any conflicting traffic actually come inside the minimum that applied? */
+function actualSeparation(snaps: EvalSnapshot[], hex: string, ts: number, conflicts: ProbeConflict[], at: EvalSnapshot): ClearanceEval["actualSeparation"] {
+  let best: NonNullable<ClearanceEval["actualSeparation"]> | null = null;
+  for (const c of conflicts) {
+    const otherHex = c.withHex ?? at.positions.find((p) => p.callsign === c.with)?.hex;
+    if (!otherHex) continue;
+    const basis = c.basis ?? "standard";
+    const a = actualApproach(snaps, hex, otherHex, ts, minimaFor(basis));
+    const cand = { with: c.with, basis, ...a };
+    if (!best || (cand.inside && !best.inside) || (cand.inside === best.inside && (cand.minLatNm ?? Infinity) < (best.minLatNm ?? Infinity))) best = cand;
+  }
+  return best;
 }
 
 function evaluateClearances(input: EvalInput, heard: HeardTransmission[]): ClearanceEval[] {
@@ -165,6 +262,8 @@ function evaluateClearances(input: EvalInput, heard: HeardTransmission[]): Clear
   const decl = airport.declinationDeg ?? 0;
   const out: ClearanceEval[] = [];
   const lastByHex = new Map<string, Clearance>();
+  const intents = intentLog(heard);
+  const visual = visualLog(heard);
   for (const h of heard) {
     if (h.speaker !== "controller" || !h.hex || !h.callsign) continue;
     for (const [i, req] of h.clearances.entries()) {
@@ -174,7 +273,15 @@ function evaluateClearances(input: EvalInput, heard: HeardTransmission[]): Clear
       const key = `${h.hex}:${req.kind}`;
       const prev = lastByHex.get(key) ?? null;
       let ruling: ShadowRuling | null = null;
-      if (at) ruling = shadowRuling({ ...at.pos, ts: h.ts }, req, at.snap.positions, airport, prev);
+      // Context: clearances heard in the previous 120 s (plus the other kind of clearance in this same transmission,
+      // never this clearance itself) and visual separation calls in the previous 5 minutes.
+      const ctx = heardContext(
+        intents.filter((e) => e.ts < h.ts || (e.ts === h.ts && e.hex === h.hex && e.kind !== req.kind)),
+        visual,
+        h.ts,
+      );
+      if (at) ruling = shadowRuling({ ...at.pos, ts: h.ts }, req, at.snap.positions, airport, prev, ctx);
+      const actual = at && ruling?.decision === "unable" && ruling.conflicts.length ? actualSeparation(snapshots, h.hex, h.ts, ruling.conflicts, at.snap) : null;
       const track = trackOf(snapshots, h.hex, h.ts - TRACK_BEFORE_SEC * 1000, h.ts + OUTCOME_WINDOW_SEC.altitude * 1000).map((p) => ({
         t: Math.round((p.ts - h.ts) / 1000),
         altFt: p.altFt,
@@ -190,6 +297,7 @@ function evaluateClearances(input: EvalInput, heard: HeardTransmission[]): Clear
         before: at ? { altFt: at.pos.altFt, magTrackDeg: Math.round(trueToMag(at.pos.trackTrueDeg, decl)), vertRateFpm: Math.round(at.pos.vertRateFpm) } : null,
         outcome: at ? judgeOutcome(req, h.ts, after, decl) : { result: "no_data", detail: "Aircraft not in the ADS-B recording at that moment.", reachedInSec: null },
         ruling,
+        ...(actual ? { actualSeparation: actual } : {}),
         track,
       });
       lastByHex.set(key, { ...req, issuedAt: h.ts, graceUntil: h.ts, deadlineAt: h.ts, issuedBy: "CONTROLLER", phraseology: h.text });
@@ -203,10 +311,13 @@ function evaluateConflicts(input: EvalInput, heard: HeardTransmission[]): Confli
   const allowed = input.caPairAllowed ?? (() => true);
   const lastSeen = new Map<string, number>();
   const out: ConflictEval[] = [];
+  const sorted = [...heard].sort((a, b) => a.ts - b.ts);
+  const intents = intentLog(sorted);
+  const visual = visualLog(sorted);
   for (const s of snapshots) {
     if (s.ts < fromTs || s.ts >= toTs) continue;
     const byHex = new Map(s.positions.map((p) => [p.hex, p]));
-    for (const c of conflictAlert(s.positions, airport)) {
+    for (const c of conflictAlert(s.positions, airport, heardContext(intents, visual, s.ts))) {
       const a = byHex.get(c.hexA);
       const b = byHex.get(c.hexB);
       if (!a || !b || !allowed(a, b)) continue;
@@ -215,7 +326,9 @@ function evaluateConflicts(input: EvalInput, heard: HeardTransmission[]): Confli
       lastSeen.set(key, s.ts);
       if (prev != null && s.ts - prev < CA_EPISODE_GAP_MS) continue;
 
-      // Actual closest approach over the lookahead, from recorded positions at the same snapshot times.
+      // Actual closest approach over the lookahead, from recorded positions at the same snapshot times,
+      // against the minimum that applied to the pair.
+      const caMinima = minimaFor(c.basis ?? "standard");
       let minLat: number | null = null;
       let vertAtMin: number | null = null;
       let los = false;
@@ -226,7 +339,7 @@ function evaluateConflicts(input: EvalInput, heard: HeardTransmission[]): Confli
         const lat = haversineNm(pa.lat, pa.lon, pb.lat, pb.lon);
         const vert = pa.altFt != null && pb.altFt != null ? Math.abs(pa.altFt - pb.altFt) : null;
         if (minLat == null || lat < minLat) (minLat = lat), (vertAtMin = vert);
-        if (lat < 3 && vert != null && vert < 1000) los = true;
+        if (vert != null && lat < caMinima.latNm && vert < caMinima.vertFt) los = true;
       }
       const acted = heard.find(
         (h) =>
@@ -268,6 +381,7 @@ export function evaluate(input: EvalInput): EvalReport {
   const controllerClr = inRange.filter((h) => h.speaker === "controller" && h.clearances.length);
   const known = clearances.filter((c) => c.outcome.result !== "no_data");
   const ruled = clearances.filter((c) => c.ruling);
+  const observed = ruled.filter((c) => c.outcome.result === "complied" || c.outcome.result === "contrary" || c.outcome.result === "no_change");
   const bins: EvalReport["bins"] = [];
   for (let t = Math.floor(fromTs / binMs) * binMs; t < toTs; t += binMs) {
     const inBin = <T extends { ts: number }>(xs: T[]) => xs.filter((x) => x.ts >= t && x.ts < t + binMs);
@@ -308,6 +422,12 @@ export function evaluate(input: EvalInput): EvalReport {
       coordinate: ruled.filter((c) => c.ruling!.decision === "coordinate").length,
       unable: ruled.filter((c) => c.ruling!.decision === "unable").length,
       agreed: ruled.filter((c) => c.ruling!.decision !== "unable" && c.outcome.result === "complied").length,
+      ruled: ruled.length,
+      wouldIssue: ruled.filter((c) => c.ruling!.decision !== "unable").length,
+      observed: observed.length,
+      agreedObserved: observed.filter((c) => c.ruling!.decision !== "unable" && c.outcome.result === "complied").length,
+      inProgress: ruled.filter((c) => c.outcome.result === "in_progress").length,
+      unableActuallyClose: ruled.filter((c) => c.ruling!.decision === "unable" && c.actualSeparation?.inside).length,
       conflicts: conflicts.length,
       conflictsWithLoS: conflicts.filter((c) => c.actualLoS).length,
       conflictsControllerActed: conflicts.filter((c) => c.controllerActed).length,

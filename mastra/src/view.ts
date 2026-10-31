@@ -1,8 +1,9 @@
 // Read-only views of the Airspace actor for workflow steps and agent tools (actors are the only source of truth).
 import { airspace } from "../../shared/adapters/actors.ts";
 import { distToBoundaryNm, trueToMag } from "../../shared/geo.ts";
+import { liveSeparationContext } from "../../shared/projection.ts";
 import { spokenCallsign } from "../../shared/telephony.ts";
-import type { Agreement, Airport, ClearanceLogEntry, ConflictAlert, Directive, Handoff, Position, Sector, TrafficEntry } from "../../shared/types.ts";
+import type { Agreement, Airport, ClearanceLogEntry, ConflictAlert, Directive, Handoff, Position, Sector, SeparationContext, TrafficEntry } from "../../shared/types.ts";
 
 export interface AirspaceView {
   airport: Airport | null;
@@ -44,7 +45,16 @@ export function toPosition(t: TrafficEntry): Position {
     vertRateFpm: t.vertRateFpm,
     seenSec: t.seenSec,
     ts: t.ts,
+    ...(t.isVfr !== undefined ? { isVfr: t.isVfr } : {}),
   };
+}
+
+/**
+ * Separation context for probes and candidates over the live view: same as the bridge's conflict alert
+ * (aircraft flying one of our clearances from the last 120 s are projected along it; no visual separation live).
+ */
+export function separationContext(view: Pick<AirspaceView, "clearanceLog" | "statuses">, now = Date.now()): SeparationContext {
+  return liveSeparationContext(view.clearanceLog ?? [], view.statuses, now);
 }
 
 export async function getView(): Promise<AirspaceView> {

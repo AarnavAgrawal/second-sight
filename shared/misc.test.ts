@@ -11,9 +11,9 @@ describe("normalizeAdsb", () => {
   const raw = {
     now: NOW / 1000,
     ac: [
-      { hex: "76CEF5", type: "adsb_icao", flight: "SIA12   ", r: "9V-SWU", t: "B77W", alt_baro: 35000, alt_geom: 35050, gs: 477.7, track: 132.71, baro_rate: 0, lat: 37.726547, lon: -122.791677, seen_pos: 0.393, seen: 0.2 },
+      { hex: "76CEF5", type: "adsb_icao", flight: "SIA12   ", r: "9V-SWU", t: "B77W", alt_baro: 35000, alt_geom: 35050, gs: 477.7, track: 132.71, baro_rate: 0, lat: 37.726547, lon: -122.791677, seen_pos: 0.393, seen: 0.2, squawk: "6257" },
       { hex: "a1", alt_baro: "ground", lat: 37.6, lon: -122.4, seen: 1 },
-      { hex: "a2", r: "N335RV", alt_baro: 5000, geom_rate: -640, true_heading: 270, gs: 120, lat: 37.6, lon: -122.4, seen: 2 },
+      { hex: "a2", r: "N335RV", squawk: "1200", alt_baro: 5000, geom_rate: -640, true_heading: 270, gs: 120, lat: 37.6, lon: -122.4, seen: 2 },
       { hex: "a3", alt_baro: 6000, lat: 37.6, lon: -122.4 },
       { hex: "a4", flight: "UAL1", alt_baro: 900, lat: 37.6, lon: -122.4, seen: 0 },
       { hex: "a5", flight: "UAL2", alt_baro: 9000, lat: 37.6, lon: -122.4, seen: 31 },
@@ -39,7 +39,15 @@ describe("normalizeAdsb", () => {
       vertRateFpm: 0,
       seenSec: 0.2,
       ts: NOW - 393,
+      squawk: "6257",
+      isVfr: false,
     });
+  });
+  test("squawk 1200 is VFR; no squawk is null and not VFR", () => {
+    expect(out[1]!.squawk).toBe("1200");
+    expect(out[1]!.isVfr).toBe(true);
+    expect(out[2]!.squawk).toBeNull();
+    expect(out[2]!.isVfr).toBe(false);
   });
   test("fallbacks: registration callsign, geom_rate, true_heading, hex callsign", () => {
     expect(out[1]!.callsign).toBe("N335RV");

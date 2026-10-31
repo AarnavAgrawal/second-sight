@@ -109,3 +109,14 @@ describe("mergeTraffic: coasting", () => {
     expect(r.trackControl.c1).toBe("NORTH");
   });
 });
+
+describe("mergeTraffic: isVfr", () => {
+  test("carries isVfr into the traffic list (false when the position has none)", () => {
+    const r = mergeTraffic(input({ batch: [north({ hex: "v1", isVfr: true }), south({ hex: "i1", isVfr: false }), south({ hex: "x1" })] }));
+    expect(r.traffic.map((t) => [t.hex, t.isVfr])).toEqual([
+      ["v1", true],
+      ["i1", false],
+      ["x1", false],
+    ]);
+  });
+});

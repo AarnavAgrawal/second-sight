@@ -32,6 +32,10 @@ export interface Position {
   seenSec: number;
   /** Epoch ms when this position was observed. */
   ts: number;
+  /** Mode A code from the ADS-B `squawk` field, or null when the feed has none (TIS-B etc.). */
+  squawk?: string | null;
+  /** Squawking 1200 (VFR). normalizeAdsb always sets it; optional so older data and fixtures still type-check. */
+  isVfr?: boolean;
 }
 
 export type ClearanceKind = "altitude" | "heading";
@@ -53,9 +57,39 @@ export interface Clearance extends ClearanceRequest {
 
 export interface ProbeConflict {
   with: string;
+  /** ICAO hex of the conflicting traffic. */
+  withHex?: string;
   minLatNm: number;
   minVertFt: number;
   inSec: number;
+  /** Separation rule that applied to the pair (shared/separation.ts pairRule). Absent = standard. */
+  basis?: SeparationBasis;
+}
+
+// ---------- Separation rules (shared/separation.ts, thresholds in SEPARATION) ----------
+
+/**
+ * Which separation rule applied to a pair (shared/separation.ts pairRule):
+ * - standard: 3 NM / 1,000 ft terminal radar separation (FAA JO 7110.65 5-5-4, 4-5-1).
+ * - high_altitude: both at or above 18,000 ft: 5 NM / 1,000 ft (5-5-4, the en route radar minimum).
+ * - vfr_mixed: one VFR (1200), one IFR: Class B VFR minima 1.5 NM / 500 ft (7-9-4).
+ * - vfr_pair: both VFR: never a conflict alert, only a traffic advisory (7-9-4: light VFR aircraft need only
+ *   target resolution from each other; traffic information per 2-1-21).
+ * - final_suppressed: both established inbound on final (near, low, descending, closing): no conflict
+ *   (simplified: parallel and in-trail finals are separated by approach procedures and visual separation,
+ *   5-9, 7-4-4, not by the 3 NM radar minimum).
+ * - visual: visual separation (7-2-1), from what was heard on the frequency (evaluation only).
+ */
+export type SeparationBasis = "standard" | "high_altitude" | "vfr_mixed" | "vfr_pair" | "final_suppressed" | "visual";
+
+/** Clearances an aircraft is currently flying (latest per kind), used to project it instead of a straight line. */
+export type Intent = { altitude?: ClearanceRequest; heading?: ClearanceRequest };
+
+export interface SeparationContext {
+  /** Aircraft (hex) with visual separation: pilot has the traffic in sight or was told to maintain visual separation. */
+  visualHex?: Set<string>;
+  /** Clearances in progress, keyed by hex (shared/projection.ts intentsFromLog). */
+  intents?: Map<string, Intent>;
 }
 
 export interface ProbeResult {
@@ -259,6 +293,8 @@ export interface TrafficEntry {
   ca: boolean;
   ts: number;
   seenSec: number;
+  /** Squawking 1200 (VFR). Always set by mergeTraffic; optional for older clients and fixtures. */
+  isVfr?: boolean;
 }
 
 export interface ConformanceResult {
@@ -279,6 +315,11 @@ export interface ShadowRuling {
   alternative: string | null;
   phase: FlightPhase;
   conflicts: ProbeConflict[];
+  /**
+   * Why this ruling differs from a strict probe (3 NM / 1,000 ft, everyone projected straight), when it does:
+   * e.g. "Passes with reduced separation on final (SKW5248)". Null when the strict probe agrees.
+   */
+  note?: string | null;
 }
 
 export interface ClearanceEval {
@@ -293,6 +334,11 @@ export interface ClearanceEval {
   before: { altFt: number | null; magTrackDeg: number; vertRateFpm: number } | null;
   outcome: { result: OutcomeResult; detail: string; reachedInSec: number | null };
   ruling: ShadowRuling | null;
+  /**
+   * Unable rulings only: did the aircraft and the conflicting traffic actually come inside the minimum that applied
+   * (recorded ADS-B, next 150 s)? Closest conflict pair reported.
+   */
+  actualSeparation?: { with: string; basis: SeparationBasis; minLatNm: number | null; vertAtMinFt: number | null; inside: boolean } | null;
   /** Track around the clearance for a sparkline: seconds relative to ts. */
   track: { t: number; altFt: number | null; magTrackDeg: number }[];
 }
@@ -342,6 +388,18 @@ export interface EvalReport {
     unable: number;
     /** Ruled issue/coordinate and the aircraft complied: Second Sight and the controller agreed. */
     agreed: number;
+    /** Clearances with a ruling (aircraft on ADS-B when heard). */
+    ruled: number;
+    /** Ruled issue or coordinate. */
+    wouldIssue: number;
+    /** Ruled clearances whose outcome was observed: complied, contrary or no_change (not in_progress, not no_data). */
+    observed: number;
+    /** Among `observed`: ruled issue/coordinate and the aircraft complied. */
+    agreedObserved: number;
+    /** Ruled clearances still in progress when the outcome window ended. */
+    inProgress: number;
+    /** Unable rulings where the pair actually came inside the minimum that applied, within 150 s. */
+    unableActuallyClose: number;
     conflicts: number;
     conflictsWithLoS: number;
     conflictsControllerActed: number;

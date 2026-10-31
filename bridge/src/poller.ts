@@ -5,10 +5,11 @@ import { normalizeAdsb } from "../../shared/adsb.ts";
 import { boundaryApproach } from "../../shared/boundary.ts";
 import { formatAltitude } from "../../shared/conformance.ts";
 import { trueToMag } from "../../shared/geo.ts";
-import { conflictAlert } from "../../shared/separation.ts";
-import type { Airport, Position, Sector } from "../../shared/types.ts";
+import { liveSeparationContext } from "../../shared/projection.ts";
+import { SEPARATION, conflictAndTrafficAlerts } from "../../shared/separation.ts";
+import type { Airport, Position, Sector, SeparationContext } from "../../shared/types.ts";
 import { config } from "./config.ts";
-import { boundaryGate, caPairAllowed, discreteSquawkSet, dropShadows, latestHandoffByHex, type HandoffLike } from "./filters.ts";
+import { boundaryGate, caPairAllowed, discreteSquawkSet, dropShadows, latestHandoffByHex, squawkSet, type HandoffLike } from "./filters.ts";
 import { postRadar } from "./radar.ts";
 import { LiveSource, ReplaySource, type Source } from "./source.ts";
 
@@ -49,6 +50,8 @@ class Poller {
   private caMisses = new Map<string, number>();
   private caSuppressUntil = new Map<string, number>();
   private seenResolved = new Set<string>();
+  /** VFR/VFR traffic advisories: pair -> last time one was posted (SEPARATION.trafficInfoDebounceSec). */
+  private trafficLastAdvised = new Map<string, number>();
 
   status(): PollerStatus {
     return {
@@ -75,6 +78,7 @@ class Poller {
     this.caMisses.clear();
     this.caSuppressUntil.clear();
     this.seenResolved.clear();
+    this.trafficLastAdvised.clear();
     this.lastError = null;
     if (config.dataSource === "replay") {
       const r = await ReplaySource.open(airport);
@@ -119,9 +123,11 @@ class Poller {
     if (gen !== this.gen) return;
     const now = Date.now();
     const positions = dropShadows(normalizeAdsb(snap, airport, now));
-    // Terminal conflict alert and handoffs are for tracked IFR traffic (discrete squawk, not VFR 1200).
-    // CA eligibility: a known, non-VFR squawk (drops TIS-B/unknown targets that carry no squawk).
+    // Handoffs are for tracked IFR traffic (discrete squawk, not VFR 1200). The conflict alert takes every squawked
+    // target, VFR included (the shared pair rule gives VFR/IFR pairs VFR minima and VFR/VFR pairs a traffic
+    // advisory); targets with no squawk (TIS-B/unknown) stay out.
     const discrete = discreteSquawkSet(snap.ac);
+    const squawked = squawkSet(snap.ac);
     this.positions = positions;
     this.latest = new Map(positions.map((p) => [p.hex, p]));
     this.lastPollAt = now;
@@ -136,9 +142,12 @@ class Poller {
     // Replay scenarios may focus CA/BOUNDARY on their scripted aircraft (scenario.json "focusCallsigns").
     const focus = this.source instanceof ReplaySource ? this.source.focusCallsigns : null;
     const eligible = positions.filter((p) => discrete.has(p.hex));
+    const caEligible = positions.filter((p) => squawked.has(p.hex));
+    // Aircraft flying one of our clearances (last 120 s, still conforming) are projected along it.
+    const sepCtx = liveSeparationContext(snapState.clearanceLog ?? [], snapState.statuses, now);
     await this.conformance(positions, snapState.statuses, tc);
     if (gen !== this.gen) return;
-    await this.conflicts(eligible, tc, snapState.conflicts, airport, now, focus);
+    await this.conflicts(caEligible, tc, snapState.conflicts, airport, now, focus, sepCtx);
     if (gen !== this.gen) return;
     await this.boundaries(focus ? eligible.filter((p) => focus.has(p.callsign)) : eligible, tc, snapState.handoffs, airport, now);
   }
@@ -197,13 +206,18 @@ class Poller {
     airport: Airport,
     now: number,
     focus: Set<string> | null = null,
+    ctx?: SeparationContext,
   ) {
-    // Terminal-area rules (filters.ts): replay focus, approach corridor, low-level GA floor.
-    const preds = conflictAlert(positions, airport).filter((c) => {
+    // Separation rules (VFR, high altitude, final approach suppression) are the shared pair rule;
+    // filters.ts adds the replay focus and the low-level GA floor.
+    const allowed = (c: { hexA: string; hexB: string }) => {
       const a = this.latest.get(c.hexA);
       const b = this.latest.get(c.hexB);
       return !!a && !!b && caPairAllowed(a, b, airport, config.caFloorAglFt, focus);
-    });
+    };
+    const alerts = conflictAndTrafficAlerts(positions, airport, ctx);
+    const preds = alerts.conflicts.filter(allowed);
+    await this.trafficAdvisories(alerts.traffic.filter(allowed), now);
     const predicted = new Set(preds.map((p) => pairKey(p.hexA, p.hexB)));
     const open = existing.filter((c) => c.state !== "resolved");
 
@@ -279,6 +293,17 @@ class Poller {
         this.caMisses.delete(key);
         await airspace().clearConflict(c.id);
       }
+    }
+  }
+
+  /** VFR/VFR pairs: an INFO alert on the scope, debounced per pair. No Relay post, no agent turn. */
+  private async trafficAdvisories(list: { hexA: string; hexB: string; a: string; b: string; minLatNm: number; minVertFt: number }[], now: number) {
+    for (const t of list) {
+      const key = pairKey(t.hexA, t.hexB);
+      if (now - (this.trafficLastAdvised.get(key) ?? 0) < SEPARATION.trafficInfoDebounceSec * 1000) continue;
+      this.trafficLastAdvised.set(key, now);
+      const vert = Math.round(t.minVertFt / 100) * 100;
+      await airspace().addAlert({ ts: now, kind: "INFO", text: `Traffic: ${t.a} and ${t.b}, ${t.minLatNm.toFixed(1)} NM, ${vert.toLocaleString("en-US")} ft` });
     }
   }
 

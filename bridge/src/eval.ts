@@ -8,9 +8,9 @@ import { evaluate, type EvalSnapshot } from "../../mastra/src/eval/evaluate.ts";
 import { importHeard } from "../../listener/src/seed.ts";
 import { resolveAirport } from "./airports.ts";
 import { config, repoPath } from "./config.ts";
-import { caPairAllowed, discreteSquawkSet, dropShadows } from "./filters.ts";
+import { caPairAllowed, dropShadows, squawkSet } from "./filters.ts";
 
-type Loaded = { key: string; snapshots: EvalSnapshot[]; discrete: Set<string> };
+type Loaded = { key: string; snapshots: EvalSnapshot[]; squawked: Set<string> };
 const cache = new Map<string, Loaded>();
 
 /** All recordings for the airport, normalized and filtered exactly like the live poller does. Cached by file sizes. */
@@ -22,17 +22,17 @@ async function loadSnapshots(icao: string, airport: Airport): Promise<Loaded> {
   const hit = cache.get(icao);
   if (hit && hit.key === key) return hit;
   const snapshots: EvalSnapshot[] = [];
-  const discrete = new Set<string>();
+  const squawked = new Set<string>();
   for (const f of files) {
     for (const line of (await readFile(`${dir}/${f}`, "utf8")).split("\n")) {
       if (!line) continue;
       const snap = JSON.parse(line) as { ts: number; ac: Record<string, unknown>[] };
-      for (const h of discreteSquawkSet(snap.ac)) discrete.add(h);
+      for (const h of squawkSet(snap.ac)) squawked.add(h);
       snapshots.push({ ts: snap.ts, positions: dropShadows(normalizeAdsb(snap, airport, snap.ts)) });
     }
   }
   snapshots.sort((a, b) => a.ts - b.ts);
-  const loaded = { key, snapshots, discrete };
+  const loaded = { key, snapshots, squawked };
   cache.set(icao, loaded);
   return loaded;
 }
@@ -48,7 +48,7 @@ export async function evalRoute(req: Request, url: URL): Promise<Response | null
   let heard = await evalLog(airport.icao).heard(0, Number.MAX_SAFE_INTEGER);
   // Fresh machine: EvalLog is local SQLite, so load the exported seed (data/eval/<ICAO>/heard.jsonl) if there is one.
   if (!heard.length && (await importHeard(airport.icao)) > 0) heard = await evalLog(airport.icao).heard(0, Number.MAX_SAFE_INTEGER);
-  const { snapshots, discrete } = await loadSnapshots(airport.icao, airport);
+  const { snapshots, squawked } = await loadSnapshots(airport.icao, airport);
   if (!heard.length) return json({ error: `No heard transmissions for ${airport.icao}. Run the listener (bun run listener backfill ${airport.icao}) or add data/eval/${airport.icao}/heard.jsonl from the machine that has it (bun run listener:export ${airport.icao}).` }, 404);
   const heardFrom = Math.min(...heard.map((h) => h.ts));
   const heardTo = Math.max(...heard.map((h) => h.ts)) + 1;
@@ -61,9 +61,9 @@ export async function evalRoute(req: Request, url: URL): Promise<Response | null
     heard,
     fromTs,
     toTs,
-    // Same CA eligibility as the live loop: tracked IFR (discrete squawk) plus the terminal-area filters.
+    // Same CA eligibility as the live loop: squawked targets (VFR included, TIS-B/no squawk out) plus the CA floor.
     caPairAllowed: (a: Position, b: Position) =>
-      discrete.has(a.hex) && discrete.has(b.hex) && caPairAllowed(a, b, airport, config.caFloorAglFt),
+      squawked.has(a.hex) && squawked.has(b.hex) && caPairAllowed(a, b, airport, config.caFloorAglFt),
   });
   console.log(`[eval] ${airport.icao} ${new Date(fromTs).toISOString().slice(11, 16)}-${new Date(toTs).toISOString().slice(11, 16)}Z: ${report.clearances.length} clearances, ${report.conflicts.length} CAs (${Date.now() - t0} ms)`);
   return json(report);

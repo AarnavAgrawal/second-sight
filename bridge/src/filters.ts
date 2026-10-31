@@ -3,10 +3,6 @@
 import { haversineNm } from "../../shared/geo.ts";
 import type { Airport, Position, Sector } from "../../shared/types.ts";
 
-/** Approach/departure corridor: within this distance of the field ... */
-export const CORRIDOR_NM = 6;
-/** ... and below this height above the field. */
-export const CORRIDOR_AGL_FT = 3_000;
 /** A failed handoff (overdue or unable) may re-emit BOUNDARY once, this long after its dueAt. */
 export const HANDOFF_RETRY_AFTER_MS = 30_000;
 
@@ -32,16 +28,24 @@ export function discreteSquawkSet(rawAc: Record<string, unknown>[]): Set<string>
   );
 }
 
-/** Within 6 NM of the field and below 3,000 ft AGL: approach/departure corridor (parallel-runway traffic). */
-export function inApproachCorridor(p: Position, airport: Pick<Airport, "lat" | "lon" | "elevationFt">): boolean {
-  return haversineNm(p.lat, p.lon, airport.lat, airport.lon) < CORRIDOR_NM && (p.altFt ?? 0) < airport.elevationFt + CORRIDOR_AGL_FT;
+/**
+ * Hexes (lowercase) with any squawk, VFR 1200 included. Conflict alert / traffic advisory eligibility: the shared
+ * pair rule (shared/separation.ts) needs VFR targets for VFR/VFR traffic advisories and VFR/IFR minima.
+ * Targets with no squawk (TIS-B/unknown) stay out.
+ */
+export function squawkSet(rawAc: Record<string, unknown>[]): Set<string> {
+  return new Set(
+    rawAc
+      .filter((a) => a.squawk != null && String(a.squawk).trim() !== "" && a.hex != null)
+      .map((a) => String(a.hex).toLowerCase()),
+  );
 }
 
 /**
- * Whether a predicted conflict between `a` and `b` should be alerted.
+ * Whether a predicted conflict (or VFR traffic advisory) between `a` and `b` should be raised.
  * - With a replay focus set, at least one aircraft must be a focus callsign.
- * - Both in the approach corridor: parallel-runway traffic, not a conflict.
  * - Both below the CA floor (field elevation + caFloorAglFt): low-level GA, not alerted.
+ * Aircraft established on final are handled by the shared pair rule (final approach suppression), not here.
  */
 export function caPairAllowed(
   a: Position,
@@ -51,7 +55,6 @@ export function caPairAllowed(
   focus: Set<string> | null = null,
 ): boolean {
   if (focus && !focus.has(a.callsign) && !focus.has(b.callsign)) return false;
-  if (inApproachCorridor(a, airport) && inApproachCorridor(b, airport)) return false;
   const floor = airport.elevationFt + caFloorAglFt;
   return !((a.altFt ?? 0) < floor && (b.altFt ?? 0) < floor);
 }

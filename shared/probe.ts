@@ -1,11 +1,15 @@
 // Clearance probe (CLAUDE.md section 9): validity, simplified floor, conflict probe, alternative.
-import type { Airport, ClearanceRequest, Position, ProbeConflict, ProbeResult } from "./types.ts";
-import { angleDiff, destination, magToTrue, norm360, toHeading } from "./geo.ts";
-import { HORIZON_SEC, STEP_SEC, firstLoss, straightPath, type PathPoint } from "./separation.ts";
+// The conflict probe uses the same pair rule as the conflict alert (separation.ts pairRule), so a clearance the
+// probe passes never immediately raises a CA, and vice versa.
+import type { Airport, ClearanceRequest, Position, ProbeConflict, ProbeResult, SeparationContext } from "./types.ts";
+import { norm360, toHeading } from "./geo.ts";
+import { mergePaths, pathFor, projectClearedPath, type PathPoint } from "./projection.ts";
+import { BASIS_LABEL, pairLoss, pairRule } from "./separation.ts";
+
+// Moved to projection.ts; re-exported so existing imports keep working.
+export { MIN_PROBE_RATE_FPM, TURN_RATE_DEG_PER_SEC, projectClearedPath } from "./projection.ts";
 
 export const MAX_ALTITUDE_FT = 45000;
-export const MIN_PROBE_RATE_FPM = 1500;
-export const TURN_RATE_DEG_PER_SEC = 3;
 
 /** Simplified minimum altitude floor: field elevation + 1,500 ft, rounded up to the next 100 ft. */
 export function simplifiedFloorFt(airport: Pick<Airport, "elevationFt">): number {
@@ -32,92 +36,45 @@ export function validateClearance(req: ClearanceRequest, airport: Airport): stri
 }
 
 /**
- * Model the cleared aircraft's new profile, sampled every STEP_SEC from 0 to HORIZON_SEC.
- * Altitude: climb/descend at max(|current rate|, 1,500 fpm) toward the cleared altitude, then level;
- * lateral path straight. Heading (magnetic): converted to true, standard-rate turn (3 deg/s) in the
- * cleared direction (or the shorter way), then straight; vertical rate unchanged.
+ * The probed aircraft's path: the requested clearance, combined with the other kind of clearance it is already
+ * flying (ctx.intents), if any. Without an intent this is exactly projectClearedPath.
  */
-export function projectClearedPath(p: Position, req: ClearanceRequest, declinationDeg: number): PathPoint[] {
-  const out: PathPoint[] = [];
-  if (req.kind === "altitude") {
-    const rate = Math.max(Math.abs(p.vertRateFpm), MIN_PROBE_RATE_FPM);
-    for (let t = 0; t <= HORIZON_SEC; t += STEP_SEC) {
-      const distNm = (p.gsKt * t) / 3600;
-      const d = distNm > 0 ? destination(p.lat, p.lon, p.trackTrueDeg, distNm) : { lat: p.lat, lon: p.lon };
-      let altFt: number | null = null;
-      if (p.altFt != null) {
-        const diff = req.value - p.altFt;
-        const change = Math.min(Math.abs(diff), (rate * t) / 60);
-        altFt = p.altFt + Math.sign(diff) * change;
-      }
-      out.push({ lat: d.lat, lon: d.lon, altFt });
-    }
-    return out;
-  }
-
-  // Heading clearance: integrate in 1 s steps.
-  const targetTrue = magToTrue(req.value, declinationDeg);
-  let dir: number;
-  let total: number;
-  if (req.turn === "right") {
-    dir = 1;
-    total = norm360(targetTrue - p.trackTrueDeg);
-  } else if (req.turn === "left") {
-    dir = -1;
-    total = norm360(p.trackTrueDeg - targetTrue);
-  } else {
-    const d = angleDiff(p.trackTrueDeg, targetTrue);
-    dir = Math.sign(d);
-    total = Math.abs(d);
-  }
-  let lat = p.lat;
-  let lon = p.lon;
-  let hdg = p.trackTrueDeg;
-  let turned = 0;
-  const stepNm = p.gsKt / 3600;
-  const altAt = (t: number) => (p.altFt == null ? null : p.altFt + (p.vertRateFpm * t) / 60);
-  out.push({ lat, lon, altFt: altAt(0) });
-  for (let t = 1; t <= HORIZON_SEC; t++) {
-    const step = Math.min(TURN_RATE_DEG_PER_SEC, total - turned);
-    const before = hdg;
-    if (step > 0) {
-      turned += step;
-      hdg = norm360(hdg + dir * step);
-    }
-    // Fly the average heading over this second.
-    const mid = norm360(before + (dir * Math.max(step, 0)) / 2);
-    if (stepNm > 0) {
-      const d = destination(lat, lon, mid, stepNm);
-      lat = d.lat;
-      lon = d.lon;
-    }
-    if (t % STEP_SEC === 0) out.push({ lat, lon, altFt: altAt(t) });
-  }
-  return out;
+function probedPath(ac: Position, req: ClearanceRequest, airport: Airport, ctx?: SeparationContext): PathPoint[] {
+  const own = ctx?.intents?.get(ac.hex);
+  const requested = projectClearedPath(ac, req, airport.declinationDeg);
+  if (req.kind === "altitude" && own?.heading) return mergePaths(pathFor(ac, { heading: own.heading }, airport.declinationDeg), requested);
+  if (req.kind === "heading" && own?.altitude) return mergePaths(requested, pathFor(ac, { altitude: own.altitude }, airport.declinationDeg));
+  return requested;
 }
 
-function conflictsFor(ac: Position, req: ClearanceRequest, traffic: Position[], airport: Airport): ProbeConflict[] {
-  const path = projectClearedPath(ac, req, airport.declinationDeg);
+function conflictsFor(ac: Position, req: ClearanceRequest, traffic: Position[], airport: Airport, ctx?: SeparationContext): ProbeConflict[] {
+  const path = probedPath(ac, req, airport, ctx);
   const out: ProbeConflict[] = [];
   for (const other of traffic) {
     if (other.hex === ac.hex || other.altFt == null) continue;
-    const loss = firstLoss(path, straightPath(other));
+    const r = pairRule(ac, other, airport, ctx);
+    // VFR/VFR pairs never fail the probe (traffic advisory only); visual and final-suppressed pairs have no minimum.
+    if (r.action !== "conflict") continue;
+    const loss = pairLoss(path, pathFor(other, ctx?.intents?.get(other.hex), airport.declinationDeg), r);
     if (!loss) continue;
     out.push({
       with: other.callsign,
+      withHex: other.hex,
       minLatNm: Math.round(loss.minLatNm * 10) / 10,
       minVertFt: Math.round(loss.minVertFt / 100) * 100,
       inSec: loss.inSec,
+      basis: r.basis,
     });
   }
   return out.sort((a, b) => a.inSec - b.inSec);
 }
 
-function probeCore(ac: Position, req: ClearanceRequest, traffic: Position[], airport: Airport): ProbeResult {
+function probeCore(ac: Position, req: ClearanceRequest, traffic: Position[], airport: Airport, ctx?: SeparationContext): ProbeResult {
   const reasons = validateClearance(req, airport);
-  const conflicts = reasons.length === 0 ? conflictsFor(ac, req, traffic, airport) : [];
+  const conflicts = reasons.length === 0 ? conflictsFor(ac, req, traffic, airport, ctx) : [];
   for (const c of conflicts) {
-    reasons.push(`Traffic ${c.with}, ${c.minLatNm.toFixed(1)} NM, ${c.minVertFt} ft, in ${c.inSec} s.`);
+    const basis = c.basis && c.basis !== "standard" ? ` (${BASIS_LABEL[c.basis]})` : "";
+    reasons.push(`Traffic ${c.with}, ${c.minLatNm.toFixed(1)} NM, ${c.minVertFt} ft, in ${c.inSec} s${basis}.`);
   }
   return { ok: reasons.length === 0, reasons, conflicts };
 }
@@ -141,9 +98,11 @@ function headingCandidates(req: ClearanceRequest): number[] {
 /**
  * Probe a proposed clearance against current traffic (which may include the aircraft itself).
  * ok = no reasons. When not ok, `alternative` is the first nearby clearance that passes.
+ * Each pair uses separation.ts pairRule (the same rules as the conflict alert). With a context, traffic flying a
+ * clearance (ctx.intents) is projected along it, and ctx.visualHex marks visual separation.
  */
-export function probeClearance(ac: Position, req: ClearanceRequest, traffic: Position[], airport: Airport): ProbeResult {
-  const result = probeCore(ac, req, traffic, airport);
+export function probeClearance(ac: Position, req: ClearanceRequest, traffic: Position[], airport: Airport, ctx?: SeparationContext): ProbeResult {
+  const result = probeCore(ac, req, traffic, airport, ctx);
   if (result.ok) return result;
   if (!Number.isFinite(req.value)) return result;
   const candidates = req.kind === "altitude" ? altitudeCandidates(ac, req) : headingCandidates(req);
@@ -156,7 +115,7 @@ export function probeClearance(ac: Position, req: ClearanceRequest, traffic: Pos
       if (amount > 180) continue;
       alt.turn = req.turn;
     }
-    if (probeCore(ac, alt, traffic, airport).ok) {
+    if (probeCore(ac, alt, traffic, airport, ctx).ok) {
       result.alternative = alt;
       break;
     }

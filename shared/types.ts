@@ -400,6 +400,16 @@ export interface EvalReport {
     inProgress: number;
     /** Unable rulings where the pair actually came inside the minimum that applied, within 150 s. */
     unableActuallyClose: number;
+    /**
+     * Among `observed`: Unable rulings where the aircraft complied and the controller deliberately brought the pair
+     * inside the standard minimum. Scored as presumed visual separation (pilots' "traffic in sight" is rarely
+     * matched on the recording), i.e. Second Sight would have issued it had it known.
+     */
+    visualAssumed: number;
+    /** agreedObserved + visualAssumed: agreement with the controller, visual separation assumed. */
+    agreedVisualAdjusted: number;
+    /** wouldIssue + Unables presumed visual separation (any outcome). */
+    wouldIssueVisualAdjusted: number;
     conflicts: number;
     conflictsWithLoS: number;
     conflictsControllerActed: number;

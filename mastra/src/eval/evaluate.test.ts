@@ -100,6 +100,10 @@ describe("evaluate kpis", () => {
     expect(k.agreedObserved).toBe(1);
     expect(k.inProgress).toBe(1);
     expect(k.unableActuallyClose).toBe(1);
+    // Visual-separation-adjusted scores are the strict scores plus the presumed-visual Unables, never more.
+    expect(k.agreedVisualAdjusted).toBe(k.agreedObserved + k.visualAssumed);
+    expect(k.visualAssumed).toBeLessThanOrEqual(k.unableActuallyClose);
+    expect(k.wouldIssueVisualAdjusted).toBe(k.wouldIssue + k.unableActuallyClose);
     expect(byCs("UAL4").actualSeparation?.inside).toBe(true);
   });
 });

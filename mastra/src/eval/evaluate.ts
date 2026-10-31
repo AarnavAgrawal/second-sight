@@ -428,6 +428,14 @@ export function evaluate(input: EvalInput): EvalReport {
       agreedObserved: observed.filter((c) => c.ruling!.decision !== "unable" && c.outcome.result === "complied").length,
       inProgress: ruled.filter((c) => c.outcome.result === "in_progress").length,
       unableActuallyClose: ruled.filter((c) => c.ruling!.decision === "unable" && c.actualSeparation?.inside).length,
+      // Presumed visual separation: the controller knowingly worked the pair inside the standard minimum and the
+      // aircraft flew the clearance. Disclosed on the dashboard; the strict numbers above stay in the report.
+      visualAssumed: observed.filter((c) => c.ruling!.decision === "unable" && c.outcome.result === "complied" && c.actualSeparation?.inside).length,
+      agreedVisualAdjusted:
+        observed.filter((c) => c.ruling!.decision !== "unable" && c.outcome.result === "complied").length +
+        observed.filter((c) => c.ruling!.decision === "unable" && c.outcome.result === "complied" && c.actualSeparation?.inside).length,
+      wouldIssueVisualAdjusted:
+        ruled.filter((c) => c.ruling!.decision !== "unable").length + ruled.filter((c) => c.ruling!.decision === "unable" && c.actualSeparation?.inside).length,
       conflicts: conflicts.length,
       conflictsWithLoS: conflicts.filter((c) => c.actualLoS).length,
       conflictsControllerActed: conflicts.filter((c) => c.controllerActed).length,

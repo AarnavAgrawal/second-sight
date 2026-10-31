@@ -220,18 +220,24 @@ function Kpis({ r }: { r: EvalReport }) {
         </div>
       </div>
       <div className="kpi">
-        <div className="kpi-label">Second Sight would issue</div>
-        <div className="kpi-value ok">{pct(wouldIssue, ruled)}</div>
+        <div className="kpi-label">Agreed with the controller</div>
+        <div className="kpi-value ok">
+          {k.agreedVisualAdjusted != null && k.observed ? pct(k.agreedVisualAdjusted, k.observed) : k.observed != null ? pct(k.agreedObserved ?? 0, k.observed) : "—"}
+        </div>
         <div className="kpi-note">
-          {wouldIssue} of {ruled} controller clearances: {k.issue} directly, {k.coordinate} after coordinating with the other sector.
+          {k.agreedVisualAdjusted ?? k.agreedObserved} of {k.observed} clearances whose outcome was seen
+          {k.visualAssumed ? `, counting ${k.visualAssumed} where the controller deliberately worked the pair inside 3 NM / 1,000 ft as visual separation (rarely audible on the recording)` : ""}.
+          {" "}Strict, no visual separation assumed: {pct(k.agreedObserved ?? 0, k.observed ?? 0)}
+          {k.inProgress ? ` · ${k.inProgress} still in progress, excluded` : ""}.
         </div>
       </div>
       <div className="kpi">
-        <div className="kpi-label">Agreed (outcome observed)</div>
-        <div className="kpi-value ok">{k.observed != null ? pct(k.agreedObserved ?? 0, k.observed) : "—"}</div>
+        <div className="kpi-label">Second Sight would issue</div>
+        <div className="kpi-value ok">{pct(k.wouldIssueVisualAdjusted ?? wouldIssue, ruled)}</div>
         <div className="kpi-note">
-          Would issue it and the aircraft flew it: {k.agreedObserved ?? "—"} of {k.observed ?? "—"} whose outcome was seen
-          {k.inProgress != null ? ` (${k.inProgress} still in progress when the window ended, excluded)` : ""}.
+          {k.wouldIssueVisualAdjusted ?? wouldIssue} of {ruled} controller clearances ({k.issue} directly, {k.coordinate} after coordinating
+          {k.wouldIssueVisualAdjusted != null && k.wouldIssueVisualAdjusted > wouldIssue ? `, ${k.wouldIssueVisualAdjusted - wouldIssue} with visual separation assumed` : ""}).
+          {" "}Strict: {pct(wouldIssue, ruled)}.
         </div>
       </div>
       <div className="kpi">

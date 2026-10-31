@@ -1,6 +1,7 @@
 // Terse Durable Actors for Second Sight (CLAUDE.md section 8).
 // Airspace (id "main") owns the airport, traffic, track control, handoffs, conflict alerts, feed.
 // Aircraft (id = ICAO hex) owns one aircraft's clearance and conformance timer.
+// EvalLog (id = airport ICAO) stores evaluation data: transmissions heard on the real frequency.
 // Actors process one call at a time, so track control can never be split during a handoff.
 import { Actor, Emittable, Persisted } from "terse-sdk/actor";
 import type {
@@ -14,6 +15,7 @@ import type {
   Directive,
   FeedItem,
   Handoff,
+  HeardTransmission,
   Position,
   Sector,
   Status,
@@ -474,5 +476,64 @@ function setAircraftStatus(ac: Aircraft, status: Status, reason: string): void {
     // broadcast/id are protected on Actor; this helper is part of the Aircraft implementation.
     const self = ac as unknown as { id: string; broadcast(message: unknown): void };
     self.broadcast({ type: "status", hex: self.id, status, reason });
+  }
+}
+
+type HeardRow = { id: string; feed: string; ts: number; dur_sec: number; text: string; speaker: string; callsign: string | null; hex: string | null; clearances: string; note: string | null };
+
+/** Idempotent schema setup; cheap enough to run on every call. (Actor classes may only have async methods.) */
+function ensureEvalSchema(db: { exec(sql: string): unknown }) {
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS heard (
+      id TEXT PRIMARY KEY, feed TEXT NOT NULL, ts INTEGER NOT NULL, dur_sec REAL NOT NULL, text TEXT NOT NULL,
+      speaker TEXT NOT NULL, callsign TEXT, hex TEXT, clearances TEXT NOT NULL, note TEXT)`,
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS heard_ts ON heard(ts)");
+  db.exec("CREATE INDEX IF NOT EXISTS heard_callsign ON heard(callsign, ts)");
+}
+
+export class EvalLog extends Actor {
+  /** Insert or replace heard transmissions (idempotent by id). */
+  async addHeard(rows: HeardTransmission[]): Promise<{ ok: true; count: number }> {
+    ensureEvalSchema(this.db);
+    await this.db.transaction(async () => {
+      for (const r of rows) {
+        this.db.exec(
+          "INSERT OR REPLACE INTO heard (id, feed, ts, dur_sec, text, speaker, callsign, hex, clearances, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          r.id, r.feed, r.ts, r.durSec, r.text, r.speaker, r.callsign, r.hex, JSON.stringify(r.clearances), r.note,
+        );
+      }
+    });
+    return { ok: true, count: rows.length };
+  }
+
+  /** Delete heard transmissions whose id starts with `prefix` (test data, re-runs). */
+  async removeHeard(prefix: string): Promise<{ ok: true; removed: number }> {
+    ensureEvalSchema(this.db);
+    const [r] = this.db.exec<{ n: number }>("SELECT COUNT(*) AS n FROM heard WHERE id LIKE ? || '%'", prefix);
+    this.db.exec("DELETE FROM heard WHERE id LIKE ? || '%'", prefix);
+    return { ok: true, removed: Number(r?.n ?? 0) };
+  }
+
+  /** Heard transmissions in [fromTs, toTs), optionally for one callsign, oldest first. */
+  async heard(fromTs: number, toTs: number, callsign?: string): Promise<HeardTransmission[]> {
+    ensureEvalSchema(this.db);
+    const rows = callsign
+      ? this.db.exec<HeardRow>("SELECT * FROM heard WHERE callsign = ? AND ts >= ? AND ts < ? ORDER BY ts", callsign, fromTs, toTs)
+      : this.db.exec<HeardRow>("SELECT * FROM heard WHERE ts >= ? AND ts < ? ORDER BY ts", fromTs, toTs);
+    return rows.map((r) => ({
+      id: r.id, feed: r.feed, ts: Number(r.ts), durSec: Number(r.dur_sec), text: r.text,
+      speaker: r.speaker as HeardTransmission["speaker"], callsign: r.callsign, hex: r.hex,
+      clearances: JSON.parse(r.clearances), note: r.note,
+    }));
+  }
+
+  /** Time span and counts of stored data, for the dashboard's range picker. */
+  async summary(): Promise<{ heard: number; withClearance: number; fromTs: number | null; toTs: number | null }> {
+    ensureEvalSchema(this.db);
+    const [s] = this.db.exec<{ n: number; c: number; a: number | null; b: number | null }>(
+      "SELECT COUNT(*) AS n, SUM(CASE WHEN clearances != '[]' THEN 1 ELSE 0 END) AS c, MIN(ts) AS a, MAX(ts) AS b FROM heard",
+    );
+    return { heard: Number(s?.n ?? 0), withClearance: Number(s?.c ?? 0), fromTs: s?.a == null ? null : Number(s.a), toTs: s?.b == null ? null : Number(s.b) };
   }
 }

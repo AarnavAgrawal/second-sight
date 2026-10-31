@@ -212,6 +212,23 @@ export interface ConflictAlert {
   dueAt: number;
 }
 
+/** One transmission heard on a real ATC frequency (LiveATC archive), transcribed and parsed. Evaluation data only. */
+export interface HeardTransmission {
+  id: string;
+  feed: string;
+  ts: number;
+  durSec: number;
+  text: string;
+  speaker: "controller" | "pilot" | "unknown";
+  /** ICAO callsign matched against ADS-B traffic at that moment, or null. */
+  callsign: string | null;
+  hex: string | null;
+  /** Altitude/heading clearances in the transmission (controller) or read back (pilot). */
+  clearances: ClearanceRequest[];
+  /** Anything else worth keeping: frequency change, approach clearance, traffic call. */
+  note: string | null;
+}
+
 export interface FeedItem {
   ts: number;
   from: string;

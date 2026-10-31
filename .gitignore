@@ -13,3 +13,7 @@ dist/
 .claude/worktrees/
 # Demo replay recording used by data/recordings/KSFO/scenario.json since 12:55 (21 min, 5.4 MB)
 !data/recordings/KSFO/20261031-123209.jsonl
+data/recordings/**/*.mp3
+.DS_Store
+.superserve-sandbox
+data/atc/

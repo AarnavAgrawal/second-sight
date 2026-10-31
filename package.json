@@ -2,14 +2,23 @@
   "name": "second-sight",
   "private": true,
   "type": "module",
-  "workspaces": ["shared", "bridge", "agents", "mastra", "web"],
+  "workspaces": [
+    "shared",
+    "bridge",
+    "agents",
+    "mastra",
+    "web",
+    "listener"
+  ],
   "scripts": {
     "build:airports": "bun scripts/build-airports.ts",
     "bridge": "bun bridge/src/index.ts",
     "agent": "bun agents/src/index.ts",
     "backend": "bun scripts/backend.ts",
     "web": "bun run --cwd web dev",
-    "test": "bun test shared bridge mastra"
+    "test": "bun test shared bridge mastra",
+    "listener": "bun listener/src/index.ts",
+    "listener:parse": "bun listener/src/parse.ts"
   },
   "devDependencies": {
     "bun-types": "^1.4.4",

@@ -2,6 +2,7 @@
 export interface ActorTypes {
     Aircraft: $AircraftContract
     Airspace: $AirspaceContract
+    EvalLog: $EvalLogContract
 }
 interface $AircraftContract {
     Metadata
@@ -219,6 +220,33 @@ interface $AirspaceContract {
         }>
     }
 }
+interface $EvalLogContract {
+    Metadata
+    Incoming
+    Outgoing
+    State: {}
+    Methods: {
+        /** Insert or replace heard transmissions (idempotent by id). */
+        addHeard(rows: HeardTransmission[]): Promise<{
+            ok: true
+            count: number
+        }>
+        /** Heard transmissions in [fromTs, toTs), optionally for one callsign, oldest first. */
+        heard(fromTs: number, toTs: number, callsign?: string): Promise<HeardTransmission[]>
+        /** Delete heard transmissions whose id starts with `prefix` (test data, re-runs). */
+        removeHeard(prefix: string): Promise<{
+            ok: true
+            removed: number
+        }>
+        /** Time span and counts of stored data, for the dashboard's range picker. */
+        summary(): Promise<{
+            heard: number
+            withClearance: number
+            fromTs: number | null
+            toTs: number | null
+        }>
+    }
+}
 interface Agreement {
     id: string
     hex: string
@@ -320,6 +348,21 @@ interface Handoff {
     dueAt: number
     state: HandoffState
     reason?: string
+}
+interface HeardTransmission {
+    id: string
+    feed: string
+    ts: number
+    durSec: number
+    text: string
+    speaker: "controller" | "pilot" | "unknown"
+    /** ICAO callsign matched against ADS-B traffic at that moment, or null. */
+    callsign: string | null
+    hex: string | null
+    /** Altitude/heading clearances in the transmission (controller) or read back (pilot). */
+    clearances: ClearanceRequest[]
+    /** Anything else worth keeping: frequency change, approach clearance, traffic call. */
+    note: string | null
 }
 interface Position {
     hex: string

@@ -56,6 +56,21 @@ export declare namespace actors {
             }
         }
     }
+    namespace EvalLog {
+        type Metadata = $ActorTypes["EvalLog"]["Metadata"]
+        type Incoming = $ActorTypes["EvalLog"]["Incoming"]
+        type Outgoing = $ActorTypes["EvalLog"]["Outgoing"]
+        type State = $ActorTypes["EvalLog"]["State"]
+        interface Authorization {
+            actorName: "EvalLog"
+            actorId: string
+            metadata: Metadata
+            clientLocation?: {
+                latitude: number
+                longitude: number
+            }
+        }
+    }
 }
 /**
  * Types for actor state and methods.
@@ -275,6 +290,52 @@ export declare namespace actors {
             }
         }
     }
+    namespace EvalLog {
+        type Stub = $ActorTypes["EvalLog"]["Methods"]
+        interface $MethodTypes {
+            ["addHeard"]: {
+                Args: Parameters<Stub["addHeard"]>
+                Result: Awaited<ReturnType<Stub["addHeard"]>>
+            }
+            ["heard"]: {
+                Args: Parameters<Stub["heard"]>
+                Result: Awaited<ReturnType<Stub["heard"]>>
+            }
+            ["removeHeard"]: {
+                Args: Parameters<Stub["removeHeard"]>
+                Result: Awaited<ReturnType<Stub["removeHeard"]>>
+            }
+            ["summary"]: {
+                Args: Parameters<Stub["summary"]>
+                Result: Awaited<ReturnType<Stub["summary"]>>
+            }
+        }
+        interface Methods extends $MethodTypes {}
+        /**
+         * Types for a method's arguments and return value.
+         * @example
+         * type Args = actors.EvalLog.Methods["addHeard"]["Args"]
+         * type Result = actors.EvalLog.Methods["addHeard"]["Result"]
+         */
+        namespace Methods {
+            namespace addHeard {
+                type Args = $MethodTypes["addHeard"]["Args"]
+                type Result = $MethodTypes["addHeard"]["Result"]
+            }
+            namespace heard {
+                type Args = $MethodTypes["heard"]["Args"]
+                type Result = $MethodTypes["heard"]["Result"]
+            }
+            namespace removeHeard {
+                type Args = $MethodTypes["removeHeard"]["Args"]
+                type Result = $MethodTypes["removeHeard"]["Result"]
+            }
+            namespace summary {
+                type Args = $MethodTypes["summary"]["Args"]
+                type Result = $MethodTypes["summary"]["Result"]
+            }
+        }
+    }
 }
 /**
  * Call actor methods from your backend.
@@ -308,13 +369,27 @@ export declare const actors: {
             dependencies?: import("./terse-transport.js").SocketProxyDependencies
         ): Promise<import("./terse-transport.js").SocketGrant>
     }
+    EvalLog: {
+        get(actorId: string, transport?: import("./terse-transport.js").ActorRpcTransport): actors.EvalLog.Stub
+        /**
+         * Allow a frontend connection after your backend checks the user's access.
+         * @example
+         * const grant = await actors.EvalLog.prepareWebsocket({ actorId: "actor-id", metadata })
+         */
+        prepareWebsocket(
+            authorization: Omit<actors.EvalLog.Authorization, "actorName">,
+            options?: import("./terse-transport.js").SocketProxyOptions,
+            dependencies?: import("./terse-transport.js").SocketProxyDependencies
+        ): Promise<import("./terse-transport.js").SocketGrant>
+    }
 }
 /**
  * The actor and connection details approved by your backend.
  * @example
  * const authorization: ActorAuthorization = { actorName: "Aircraft", actorId: "actor-id", metadata }
  */
-export type ActorAuthorization = actors.Aircraft.Authorization | actors.Airspace.Authorization
+export type ActorAuthorization =
+    actors.Aircraft.Authorization | actors.Airspace.Authorization | actors.EvalLog.Authorization
 /**
  * Allow a frontend connection after your backend checks the user's access.
  * @example
@@ -323,6 +398,7 @@ export type ActorAuthorization = actors.Aircraft.Authorization | actors.Airspace
 export declare class ActorProxy extends $SocketProxy<{
     ["Aircraft"]: import("./terse-transport.js").ProxyActor<actors.Aircraft.Metadata>
     ["Airspace"]: import("./terse-transport.js").ProxyActor<actors.Airspace.Metadata>
+    ["EvalLog"]: import("./terse-transport.js").ProxyActor<actors.EvalLog.Metadata>
 }> {
     constructor(
         options?: import("./terse-transport.js").SocketProxyOptions,
